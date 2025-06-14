@@ -6,15 +6,11 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 import math
 
-# RotaryPositionalEmbedding 类保持不变
 class RotaryPositionalEmbedding(nn.Module):
-    """
-    旋转位置编码，用于处理可变长度序列。
-    """
     def __init__(self, dim, max_seq_len=10000):
         super().__init__()
         self.dim = dim
-        assert dim % 2 == 0, "维度必须是偶数才能使用旋转编码"
+        assert dim % 2 == 0
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
         self.cached_seq_len = None
@@ -30,11 +26,7 @@ class RotaryPositionalEmbedding(nn.Module):
             self.cached_seq_len = seq_len
         return self.cached_cos, self.cached_sin
 
-# PointPatchEmbedding 类保持不变
 class PointPatchEmbedding(nn.Module):
-    """
-    点 patch 嵌入层，将连续的时间步分组为 patch。
-    """
     def __init__(self, num_points, patch_size=4, in_dim=2, embed_dim=256):
         super().__init__()
         self.conv = nn.Conv1d(in_dim, embed_dim, kernel_size=patch_size, stride=patch_size, bias=True)
@@ -61,9 +53,7 @@ class PointPatchEmbedding(nn.Module):
             patch_lengths = torch.full((batch_size,), num_patches, dtype=torch.long, device=points.device)
         return patches, patch_lengths
 
-# MultiHeadAttentionWithRoPE 类保持不变
 class MultiHeadAttentionWithRoPE(nn.Module):
-    """支持旋转位置编码 (RoPE) 的多头注意力机制"""
     def __init__(self, query_dim, key_dim, num_heads=8, dropout=0.1, use_rope=False, max_seq_len=10000):
         super().__init__()
         self.num_heads = num_heads
@@ -107,12 +97,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
 
 class PerceiverBlock(nn.Module):
-    """
-    更简洁、更接近 Perceiver IO 论文核心思想的 Block 实现。
-    流程：交叉注意力 -> 自注意力 -> 前馈网络
-    归一化：采用更稳定的 Pre-LN 结构
-    """
-    
     def __init__(self, query_dim, key_dim, num_heads=8, ff_dim=1024, dropout=0.1, use_rope=False, max_seq_len=10000):
         super().__init__()
         
@@ -129,46 +113,32 @@ class PerceiverBlock(nn.Module):
         self.norm_ffn = nn.LayerNorm(query_dim)
         self.ffn = nn.Sequential(
             nn.Linear(query_dim, ff_dim),
-            nn.GELU(), # 使用 GELU 激活函数，更现代
+            nn.GELU(), 
             nn.Dropout(dropout),
             nn.Linear(ff_dim, query_dim),
             nn.Dropout(dropout)
         )
         
     def forward(self, queries, inputs, input_mask=None, input_positions=None):
-        """
-        Args:
-            queries: (batch_size, num_queries, query_dim)
-            inputs: (batch_size, seq_len, key_dim)
-            input_mask: (batch_size, seq_len)
-            input_positions: (seq_len,)
-        """
-        # 1. 交叉注意力 (Pre-LN 结构: Norm -> Attention -> Add)
-        # queries 从 inputs 中提取信息
         if input_mask is not None and input_mask.dim() == 2:
-            input_mask = input_mask.unsqueeze(1) # 形状变为 (B, 1, S) 以便广播
+            input_mask = input_mask.unsqueeze(1) 
 
         cross_attn_out = self.cross_attn(
-            self.norm_cross(queries), # 先对 queries 进行归一化
+            self.norm_cross(queries), 
             inputs, 
             inputs, 
             mask=input_mask, 
             key_positions=input_positions
         )
-        queries = queries + cross_attn_out # 残差连接
-
-        # 2. 自注意力 (Pre-LN 结构: Norm -> Attention -> Add)
-        # queries 内部进行信息整合
+        queries = queries + cross_attn_out 
         self_attn_out = self.self_attn(
-            self.norm_self(queries), # 先归一化
+            self.norm_self(queries), 
             self.norm_self(queries),
             self.norm_self(queries)
         )
-        queries = queries + self_attn_out # 残差连接
+        queries = queries + self_attn_out 
 
-        # 3. 前馈网络 (Pre-LN 结构: Norm -> FFN -> Add)
-        # 对整合后的信息进行非线性变换
-        ffn_out = self.ffn(self.norm_ffn(queries)) # 先归一化
-        queries = queries + ffn_out # 残差连接
+        ffn_out = self.ffn(self.norm_ffn(queries)) 
+        queries = queries + ffn_out 
         
         return queries

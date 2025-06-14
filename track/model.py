@@ -2,11 +2,9 @@
 
 import torch
 import torch.nn as nn
-from layers import PointPatchEmbedding, PerceiverBlock
+from track.layers import PointPatchEmbedding, PerceiverBlock
 
 class PerceiverEncoder(nn.Module):
-    """用于处理带有 patch 嵌入和 RoPE 的可变长度二维点的 Perceiver 编码器"""
-    
     def __init__(
         self,
         num_points=32,
@@ -20,7 +18,7 @@ class PerceiverEncoder(nn.Module):
         ff_dim=1024,
         dropout=0.1,
         use_rope=True,
-        max_seq_len=10000
+        max_seq_len=2000
     ):
         super().__init__()
         self.use_rope = use_rope

@@ -4,17 +4,6 @@ import torch
 from typing import List
 
 def create_variable_length_batch(sequences: List[torch.Tensor], pad_value: float = 0.0):
-    """
-    辅助函数，用于从可变长度的序列创建填充后的批次
-    
-    Args:
-        sequences: 张量列表，每个张量形状为 (seq_len, num_points, input_dim)
-        pad_value: 用于填充的值
-    
-    Returns:
-        padded_batch: (batch_size, max_seq_len, num_points, input_dim)
-        lengths: (batch_size,) - 实际序列长度
-    """
     batch_size = len(sequences)
     max_seq_len = max(seq.size(0) for seq in sequences)
     num_points = sequences[0].size(1)

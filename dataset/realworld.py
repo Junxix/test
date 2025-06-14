@@ -70,6 +70,8 @@ class RealWorldDataset(Dataset):
         self.obs_frame_ids = []
         self.action_frame_ids = []
         self.history_frame_ids = []
+        self.track_indices = []
+        self.track_cache = {}
         self.projectors = {}
         
         for i in range(self.num_demos):
@@ -95,6 +97,7 @@ class RealWorldDataset(Dataset):
                 obs_frame_ids_list = []
                 action_frame_ids_list = []
                 history_frame_ids_list = []
+                track_indices_list = []
 
                 for cur_idx in range(len(frame_ids) - 1):
                     obs_pad_before = max(0, num_obs - cur_idx - 1)
@@ -119,6 +122,7 @@ class RealWorldDataset(Dataset):
                     obs_frame_ids_list.append(obs_frame_ids)
                     action_frame_ids_list.append(action_frame_ids)
                     history_frame_ids_list.append(history_frame_ids)
+                    track_indices_list.append(cur_idx)
 
                 self.data_paths += [demo_path] * len(obs_frame_ids_list)
                 self.cam_ids += [cam_id] * len(obs_frame_ids_list)
@@ -126,6 +130,7 @@ class RealWorldDataset(Dataset):
                 self.obs_frame_ids += obs_frame_ids_list
                 self.action_frame_ids += action_frame_ids_list
                 self.history_frame_ids += history_frame_ids_list
+                self.track_indices += track_indices_list
         
     def __len__(self):
         return len(self.obs_frame_ids)
@@ -219,6 +224,7 @@ class RealWorldDataset(Dataset):
         obs_frame_ids = self.obs_frame_ids[index]
         action_frame_ids = self.action_frame_ids[index]
         history_frame_ids = self.history_frame_ids[index] 
+        track_idx = self.track_indices[index]
 
         # directories
         color_dir = os.path.join(data_path, "cam_{}".format(cam_id), 'color')
@@ -273,6 +279,25 @@ class RealWorldDataset(Dataset):
             colors = (colors - IMG_MEAN) / IMG_STD
             cloud = np.concatenate([points, colors], axis = -1)
             clouds.append(cloud)
+
+        track_path = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords.npy")
+        track_path_right = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_right.npy")
+        
+        if track_path in self.track_cache:
+            all_tracks = self.track_cache[track_path]
+        elif os.path.exists(track_path):
+            left_tracks = np.load(track_path)
+            right_tracks = np.load(track_path_right) 
+            all_tracks = np.stack([left_tracks, right_tracks], axis=1)
+            self.track_cache[track_path] = all_tracks
+        else:
+            all_tracks = None
+
+        if all_tracks is not None:
+            # TODO: check if the track length
+            track_slice = all_tracks[:track_idx + 1]
+        else:
+            raise FileNotFoundError(f"Track file not found: {track_path}")  
 
         # actions
         action_tcps = []
@@ -355,6 +380,7 @@ class RealWorldDataset(Dataset):
         actions_normalized = torch.from_numpy(actions_normalized).float()
         relative_actions = torch.from_numpy(relative_actions).float()
         relative_actions_normalized = torch.from_numpy(relative_actions_normalized).float()
+        point_tracks = torch.from_numpy(track_slice).float()
 
         ret_dict = {
             'input_coords_list': input_coords_list,
@@ -362,7 +388,8 @@ class RealWorldDataset(Dataset):
             'action': actions,
             'action_normalized': actions_normalized,
             'relative_action': relative_actions, 
-            'relative_action_normalized': relative_actions_normalized 
+            'relative_action_normalized': relative_actions_normalized,
+            'point_tracks': point_tracks 
         }
         
         if self.with_cloud:  # warning: this may significantly slow down the training process.

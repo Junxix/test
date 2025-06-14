@@ -6,7 +6,6 @@ from utils import create_variable_length_batch
 
 if __name__ == "__main__":
     
-    # 模型配置
     config = {
         'num_points': 32,
         'input_dim': 2,
@@ -25,18 +24,16 @@ if __name__ == "__main__":
     
     model = PointPerceiver(**config)
     
-    # 创建可变长度的示例数据
     seq1 = torch.randn(12, 32, 2)
     seq2 = torch.randn(16, 32, 2)
     seq3 = torch.randn(8, 32, 2)
     
     padded_batch, lengths = create_variable_length_batch([seq1, seq2, seq3])
     
-    # 前向传播
     with torch.no_grad():
         output = model(padded_batch, lengths)
-        print(f"输入形状: {padded_batch.shape}")
-        print(f"序列长度: {lengths}")
-        print(f"Patch 长度: {lengths // config['patch_size']}")
-        print(f"输出形状: {output.shape}")
-        print(f"输出 tokens: {output.size(1)}")
+        print(f"padded_batch.shape: {padded_batch.shape}")
+        print(f"lengths: {lengths}")
+        print(f"lengths // config['patch_size']: {lengths // config['patch_size']}")
+        print(f"output.shape: {output.shape}")
+        print(f"output.size(1): {output.size(1)}")

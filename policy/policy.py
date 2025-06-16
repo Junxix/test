@@ -58,7 +58,6 @@ class RISE(nn.Module):
             perceiver_tokens = self.perceiver_encoder(point_tracks, lengths=track_lengths)
             perceiver_tokens = self.perceiver_fusion_layer(perceiver_tokens)
 
-
             src = torch.cat([src, perceiver_tokens], dim=1)
 
             perceiver_pos = torch.zeros_like(perceiver_tokens)

@@ -49,8 +49,86 @@ default_args = edict({
     "discretize_rotation": True,
     "ensemble_mode": "act",
     "use_relative_action": False,  
-    "use_perceiver": False  
+    "use_perceiver": True 
 })
+
+
+class TCPToImageConverter:
+    
+    def __init__(self, calib_dir, camera_serial="750612070851"):
+        self.camera_serial = camera_serial
+        self.img_width = 1280
+        self.img_height = 720
+        
+        tcp_file = os.path.join(calib_dir, 'tcp.npy')
+        extrinsics_file = os.path.join(calib_dir, 'extrinsics.npy')
+        intrinsics_file = os.path.join(calib_dir, 'intrinsics.npy')
+        
+        self.tcp_calib = np.load(tcp_file)
+        self.extrinsics = np.load(extrinsics_file, allow_pickle=True).item()
+        self.intrinsics = np.load(intrinsics_file, allow_pickle=True).item()
+        
+        self._build_transformation_matrices()
+        
+    def _quaternion_to_rotation_matrix(self, quaternion):
+        qw, qx, qy, qz = quaternion
+        R = np.array([
+            [1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qz*qw, 2*qx*qz + 2*qy*qw],
+            [2*qx*qy + 2*qz*qw, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qx*qw],
+            [2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx**2 - 2*qy**2]
+        ])
+        return R
+
+    def _create_transformation_matrix(self, position, quaternion):
+        R = self._quaternion_to_rotation_matrix(quaternion)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = position
+        return T
+
+    def _build_transformation_matrices(self):
+        position = self.tcp_calib[:3]
+        quaternion = self.tcp_calib[3:]
+        
+        M_end_to_base = self._create_transformation_matrix(position, quaternion)
+        
+        M_cam0433_to_end = np.array([[0, -1, 0, 0],
+                                    [1, 0, 0, 0.077],
+                                    [0, 0, 1, 0.2665],
+                                    [0, 0, 0, 1]])
+        
+        M_cam0433_to_A = self.extrinsics['043322070878'][0]
+        M_cam7506_to_A = self.extrinsics[self.camera_serial][0]
+        
+        self.M_cam_to_base = M_cam7506_to_A @ np.linalg.inv(M_cam0433_to_A) @ M_cam0433_to_end @ M_end_to_base
+        
+        self.camera_matrix = self.intrinsics[self.camera_serial]
+        
+    def tcp_to_normalized_coords(self, tcp_position):
+        results = {}
+        
+        offsets = {'left': -0.019, 'right': 0.019}
+        
+        for side, offset in offsets.items():
+            point = tcp_position.copy()
+            point[1] += offset
+            
+            object_point_world = np.append(point, 1).reshape(-1, 1)
+            
+            object_point_camera = self.M_cam_to_base @ object_point_world
+            
+            object_point_pixel = self.camera_matrix @ object_point_camera
+            object_point_pixel /= object_point_pixel[2]  
+            
+            pixel_x = object_point_pixel[0, 0]
+            pixel_y = object_point_pixel[1, 0]
+            
+            normalized_x = pixel_x / self.img_width
+            normalized_y = pixel_y / self.img_height
+            
+            results[side] = np.array([normalized_x, normalized_y])
+            
+        return results
 
 
 def create_point_cloud(colors, depths, cam_intrinsics, voxel_size = 0.005):
@@ -172,10 +250,94 @@ def compute_history_relative_actions(action_history, num_history):
     
     return relative_actions
 
-def create_dummy_point_tracks(batch_size=1, num_points=2):
+def create_dummy_point_tracks(batch_size=1, num_history=5, num_points=2):
     track_length = num_history + 1
     dummy_tracks = torch.zeros(batch_size, track_length, num_points, 2)
     return dummy_tracks
+
+def visualize_point_tracks(image, track_array, timestep):
+    import cv2
+    
+    img_height, img_width = image.shape[:2]
+    
+    vis_image = image.copy()
+    
+    pixel_tracks = track_array.copy()
+    pixel_tracks[:, :, 0] *= img_width   
+    pixel_tracks[:, :, 1] *= img_height
+    pixel_tracks = pixel_tracks.astype(int)
+    
+    colors_bgr = {
+        'left': (255, 0, 0),   
+        'right': (0, 0, 255)  
+    }
+    
+    for gripper_idx, (gripper_name, color) in enumerate(zip(['left', 'right'], colors_bgr.values())):
+        gripper_track = pixel_tracks[:, gripper_idx, :]  # shape: (seq_len, 2)
+        
+        # 绘制轨迹线（渐变透明度效果）
+        for i in range(1, len(gripper_track)):
+            pt1 = tuple(gripper_track[i-1])
+            pt2 = tuple(gripper_track[i])
+            
+            # 渐变透明度：越新的线条越不透明
+            alpha = 0.3 + 0.7 * (i / len(gripper_track))
+            thickness = max(2, int(3 * alpha))
+            
+            cv2.line(vis_image, pt1, pt2, color, thickness=thickness)
+        
+        # 绘制轨迹点
+        for i, point in enumerate(gripper_track):
+            # 确保坐标在图像范围内
+            x, y = point
+            x = max(0, min(x, img_width - 1))
+            y = max(0, min(y, img_height - 1))
+            point = (x, y)
+            
+            # 调整点的大小，最新的点更大
+            if i == len(gripper_track) - 1:  # 最新点
+                radius = 8
+                thickness = -1  # 填充
+                # 添加白色边框
+                cv2.circle(vis_image, point, radius + 2, (255, 255, 255), 2)
+            else:
+                alpha = 0.5 + 0.5 * (i / len(gripper_track))
+                radius = max(2, int(4 * alpha))
+                thickness = 2 if i < len(gripper_track) - 1 else -1
+            
+            cv2.circle(vis_image, point, radius, color, thickness)
+        
+        if len(gripper_track) > 0:
+            label_pos = gripper_track[-1]  # 最新点位置
+            label_x = max(0, min(label_pos[0] + 15, img_width - 100))
+            label_y = max(20, min(label_pos[1] - 10, img_height - 10))
+            
+            cv2.putText(vis_image, gripper_name.upper(), (label_x, label_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    
+    text_lines = [
+        f"Step: {timestep}",
+        f"Track Length: {len(track_array)}",
+        f"Left: Blue | Right: Red"
+    ]
+    
+    for i, text in enumerate(text_lines):
+        y_pos = 30 + i * 25
+        (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        cv2.rectangle(vis_image, (5, y_pos - text_height - 5), 
+                     (text_width + 15, y_pos + 5), (0, 0, 0), -1)
+        cv2.putText(vis_image, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    
+    os.makedirs('./eval_visualization/', exist_ok=True)
+    save_path = f'./eval_visualization/tracks_step_{timestep:04d}.jpg'
+    cv2.imwrite(save_path, vis_image)
+    print(f"Saved track visualization to {save_path}")
+    
+    try:
+        cv2.imshow('Gripper Point Tracks', vis_image)
+        cv2.waitKey(1)  # 非阻塞显示
+    except:
+        pass  # 在无GUI环境中忽略显示错误
 
 
 def evaluate(args_override):
@@ -239,6 +401,10 @@ def evaluate(args_override):
     projector = Projector(args.calib)
     ensemble_buffer = EnsembleBuffer(mode = args.ensemble_mode)
     
+    tcp_converter = TCPToImageConverter(args.calib, agent.camera_serial)
+    
+    gripper_tracks_history = []  
+    
     if args.discretize_rotation:
         last_rot = np.array(agent.ready_rot_6d, dtype = np.float32)
     
@@ -246,9 +412,20 @@ def evaluate(args_override):
         policy.eval()
         prev_width = None
         executed_actions = []
-        history_pos = []
+        
         for t in range(args.max_steps):
-            robot_tcp = agent.get_tcp_pose()
+            robot_tcp = agent.robot.get_tcp_pose()
+            tcp_position = robot_tcp[:3]
+            
+            normalized_coords = tcp_converter.tcp_to_normalized_coords(tcp_position)
+            
+            current_track = np.array([
+                normalized_coords['left'],   # shape: (2,)
+                normalized_coords['right']   # shape: (2,)
+            ])  # shape: (2, 2)
+            
+            gripper_tracks_history.append(current_track)
+            
             
             if t % args.num_inference_step == 0:
                 # pre-process inputs
@@ -272,8 +449,20 @@ def evaluate(args_override):
                     relative_actions = torch.from_numpy(history_relative_normalized).unsqueeze(0).to(device).float()
                 
                 if args.use_perceiver:
-                    point_tracks = create_dummy_point_tracks(1, args.num_history).to(device)
-                    track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
+                    if len(gripper_tracks_history) > 0:
+                        track_array = np.array(gripper_tracks_history)  # shape: (seq_len, 2, 2)
+                        
+                        point_tracks = torch.from_numpy(track_array).unsqueeze(0).to(device).float()  # shape: (1, seq_len, 2, 2)
+                        track_lengths = torch.tensor([len(gripper_tracks_history)], dtype=torch.long, device=device)
+                        colors_bgr = cv2.cvtColor(colors, cv2.COLOR_RGB2BGR)
+                        track_array_vis = np.array(gripper_tracks_history)
+                        visualize_point_tracks(colors_bgr, track_array_vis, t)
+      
+                        print(f"Using real point tracks: shape={point_tracks.shape}, length={track_lengths.item()}")
+                    else:
+                        point_tracks = create_dummy_point_tracks(1, args.num_history).to(device)
+                        track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
+                        print("Using dummy point tracks")
                 
                 # predict
                 pred_raw_action = policy(

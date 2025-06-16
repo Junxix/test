@@ -17,12 +17,7 @@ from diffusers.optimization import get_cosine_schedule_with_warmup
 
 from policy import RISE
 from eval_agent import Agent
-from utils.constants import (
-    IMG_MEAN, IMG_STD, TRANS_MIN, TRANS_MAX, MAX_GRIPPER_WIDTH,
-    WORKSPACE_MIN, WORKSPACE_MAX, SAFE_WORKSPACE_MIN, SAFE_WORKSPACE_MAX,
-    SAFE_EPS, GRIPPER_THRESHOLD
-)
-from dataset.constants import REL_TRANS_MAX, REL_GRIPPER_MAX
+from utils.constants import *
 from utils.training import set_seed
 from dataset.projector import Projector
 from utils.ensemble import EnsembleBuffer
@@ -47,9 +42,7 @@ default_args = edict({
     "seed": 233,
     "vis": False,
     "discretize_rotation": True,
-    "ensemble_mode": "act",
-    "use_relative_action": False,  
-    "use_perceiver": False  
+    "ensemble_mode": "act"
 })
 
 
@@ -172,11 +165,6 @@ def compute_history_relative_actions(action_history, num_history):
     
     return relative_actions
 
-def create_dummy_point_tracks(batch_size=1, num_points=2):
-    track_length = num_history + 1
-    dummy_tracks = torch.zeros(batch_size, track_length, num_points, 2)
-    return dummy_tracks
-
 
 def evaluate(args_override):
     # load default arguments
@@ -187,23 +175,6 @@ def evaluate(args_override):
     # set up device
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    perceiver_config = None
-    if args.use_perceiver:
-        perceiver_config = {
-            'num_points': 2,      
-            'input_dim': 2,       
-            'patch_size': 4,      
-            'embed_dim': 256,
-            'query_dim': 512,
-            'num_queries': 64,    
-            'num_layers': 4,
-            'num_heads': 8,
-            'ff_dim': 1024,
-            'dropout': 0.1,
-            'use_rope': True,
-            'output_dim': None    
-        }
 
     # policy
     print("Loading policy ...")
@@ -218,8 +189,7 @@ def evaluate(args_override):
         num_encoder_layers = args.num_encoder_layers,
         num_decoder_layers = args.num_decoder_layers,
         dropout = args.dropout,
-        use_relative_action = args.use_relative_action,
-        perceiver_config = perceiver_config
+        use_relative_action=True
     ).to(device)
     n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print("Number of parameters: {:.2f}M".format(n_parameters / 1e6))
@@ -241,15 +211,11 @@ def evaluate(args_override):
     
     if args.discretize_rotation:
         last_rot = np.array(agent.ready_rot_6d, dtype = np.float32)
-    
     with torch.inference_mode():
         policy.eval()
         prev_width = None
         executed_actions = []
-        history_pos = []
         for t in range(args.max_steps):
-            robot_tcp = agent.get_tcp_pose()
-            
             if t % args.num_inference_step == 0:
                 # pre-process inputs
                 colors, depths = agent.get_observation()
@@ -262,26 +228,15 @@ def evaluate(args_override):
                 feats, coords = feats.to(device), coords.to(device)
                 cloud_data = ME.SparseTensor(feats, coords)
                 
-                relative_actions = None
-                point_tracks = None
-                track_lengths = None
-                
-                if args.use_relative_action:
-                    history_relative = compute_history_relative_actions(executed_actions, args.num_history)
-                    history_relative_normalized = normalize_relative_action(history_relative)
-                    relative_actions = torch.from_numpy(history_relative_normalized).unsqueeze(0).to(device).float()
-                
-                if args.use_perceiver:
-                    point_tracks = create_dummy_point_tracks(1, args.num_history).to(device)
-                    track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
+                history_relative = compute_history_relative_actions(executed_actions, args.num_history)
+                history_relative_normalized = normalize_relative_action(history_relative)
+                history_relative_input = torch.from_numpy(history_relative_normalized).unsqueeze(0).to(device).float()
                 
                 # predict
                 pred_raw_action = policy(
-                    cloud=cloud_data, 
+                    cloud_data, 
                     actions=None, 
-                    relative_actions=relative_actions,
-                    point_tracks=point_tracks,
-                    track_lengths=track_lengths,
+                    relative_actions=history_relative_input, 
                     batch_size=1
                 ).squeeze(0).cpu().numpy()
                 
@@ -377,7 +332,5 @@ if __name__ == '__main__':
     parser.add_argument('--vis', action = 'store_true', help = 'add visualization during evaluation')
     parser.add_argument('--discretize_rotation', action = 'store_true', help = 'whether to discretize rotation process.')
     parser.add_argument('--ensemble_mode', action = 'store', type = str, help = 'temporal ensemble mode', required = False, default = 'new')
-    parser.add_argument('--use_relative_action', action = 'store_true', help = 'whether to use relative action (should match training config)')
-    parser.add_argument('--use_perceiver', action = 'store_true', help = 'whether to use perceiver (should match training config)')
 
     evaluate(vars(parser.parse_args()))

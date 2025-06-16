@@ -59,7 +59,11 @@ class Agent:
 
     def get_observation(self):
         colors, depths = self.camera.get_rgbd_image()
-        return colors, depths
+        return colors, 
+    
+    def get_tcp_pose(self):
+        tcp_pose = self.robot.get_tcp_pose()
+        return tcp_pose
     
     def set_tcp_pose(self, pose, rotation_rep, rotation_rep_convention = None, blocking = False):
         tcp_pose = xyz_rot_transform(

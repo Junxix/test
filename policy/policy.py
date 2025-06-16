@@ -42,6 +42,7 @@ class RISE(nn.Module):
 
         if perceiver_config:
             self.perceiver_encoder = PointPerceiver(**perceiver_config)
+            # todo
             self.perceiver_fusion_layer = nn.Linear(perceiver_config['query_dim'], hidden_dim)
         else:
             self.perceiver_encoder = None

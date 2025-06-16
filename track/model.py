@@ -47,9 +47,9 @@ class PerceiverEncoder(nn.Module):
     def forward(self, points, lengths=None):
         batch_size = points.size(0)
         
-        print(points.shape, lengths)
+        # print(points.shape, lengths)
         patches, patch_lengths = self.point_patch_embed(points, lengths)
-        print(patches.shape, patch_lengths)
+        # print(patches.shape, patch_lengths)
         num_patches, num_points = patches.size(1), patches.size(2)
         
         mask = None

@@ -23,6 +23,7 @@ default_args = edict({
     "aug": False,
     "aug_jitter": False,
     "num_action": 20,
+    "num_history": 5,
     "voxel_size": 0.005,
     "obs_feature_dim": 512,
     "hidden_dim": 512,
@@ -92,14 +93,13 @@ def train(args_override):
         drop_last = True
     )
 
-    # 新增: Perceiver模型的配置，以匹配新的2D轨迹数据
     perceiver_config = {
         'num_points': 2,      # 根据数据 shape (..., 2, 2)
         'input_dim': 2,       # 根据数据 shape (..., 2, 2)
         'patch_size': 4,      # 沿时间维度的patch大小
         'embed_dim': 256,
         'query_dim': 512,
-        'num_queries': 64,    # Latent queries 的数量
+        'num_queries': 64,    
         'num_layers': 4,
         'num_heads': 8,
         'ff_dim': 1024,
@@ -172,13 +172,16 @@ def train(args_override):
             cloud_feats = data['input_feats_list']
             action_data = data['action_normalized']
             relative_action_data = data.get('relative_action_normalized', None)
-            point_tracks_data = data.get('point_tracks', None) # 获取Perceiver的输入数据
+            point_tracks_data = data.get('point_tracks', None) 
+            track_lengths_data = data.get('track_lengths', None) 
 
             cloud_feats, cloud_coords, action_data = cloud_feats.to(device), cloud_coords.to(device), action_data.to(device)
             if relative_action_data is not None:
                 relative_action_data = relative_action_data.to(device)
             if point_tracks_data is not None:
                 point_tracks_data = point_tracks_data.to(device)
+            if track_lengths_data is not None:
+                track_lengths_data = track_lengths_data.to(device)
             
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
             # forward
@@ -186,8 +189,8 @@ def train(args_override):
                 cloud=cloud_data, 
                 actions=action_data, 
                 relative_actions=relative_action_data, 
-                point_tracks=point_tracks_data, # 传入Perceiver的输入
-                track_lengths=None, # 在此设置中，序列长度是固定的
+                point_tracks=point_tracks_data, 
+                track_lengths=track_lengths_data, 
                 batch_size=action_data.shape[0]
             )
             

@@ -6,6 +6,7 @@ import open3d as o3d
 import MinkowskiEngine as ME
 import torchvision.transforms as T
 import collections.abc as container_abcs
+from typing import List
 
 from PIL import Image
 from tqdm import tqdm
@@ -14,6 +15,30 @@ from torch.utils.data import Dataset
 from dataset.constants import *
 from dataset.projector import Projector
 from utils.transformation import rot_trans_mat, apply_mat_to_pose, apply_mat_to_pcd, xyz_rot_transform
+
+
+def create_variable_length_batch(sequences: List[torch.Tensor], pad_value: float = 0.0):
+    """处理变长序列的batch化"""
+    batch_size = len(sequences)
+    max_seq_len = max(seq.size(0) for seq in sequences)
+    num_points = sequences[0].size(1)
+    input_dim = sequences[0].size(2)
+    
+    padded_batch = torch.full(
+        (batch_size, max_seq_len, num_points, input_dim),
+        pad_value,
+        dtype=sequences[0].dtype,
+        device=sequences[0].device
+    )
+    
+    lengths = torch.zeros(batch_size, dtype=torch.long, device=sequences[0].device)
+    
+    for i, seq in enumerate(sequences):
+        seq_len = seq.size(0)
+        padded_batch[i, :seq_len] = seq
+        lengths[i] = seq_len
+        
+    return padded_batch, lengths
 
 
 class RealWorldDataset(Dataset):
@@ -280,7 +305,7 @@ class RealWorldDataset(Dataset):
             cloud = np.concatenate([points, colors], axis = -1)
             clouds.append(cloud)
 
-        track_path = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords.npy")
+        track_path = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_left.npy")
         track_path_right = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_right.npy")
         
         if track_path in self.track_cache:
@@ -407,7 +432,18 @@ def collate_fn(batch):
         ret_dict = {}
         for key in batch[0]:
             if key in TO_TENSOR_KEYS:
-                ret_dict[key] = collate_fn([d[key] for d in batch])
+                if key == 'point_tracks':
+                    point_tracks_list = [d[key] for d in batch]
+                    lengths = [pt.size(0) for pt in point_tracks_list]
+                    if len(set(lengths)) == 1:
+                        ret_dict[key] = torch.stack(point_tracks_list, 0)
+                        ret_dict['track_lengths'] = None
+                    else:
+                        padded_batch, track_lengths = create_variable_length_batch(point_tracks_list)
+                        ret_dict[key] = padded_batch
+                        ret_dict['track_lengths'] = track_lengths
+                else:
+                    ret_dict[key] = collate_fn([d[key] for d in batch])
             else:
                 ret_dict[key] = [d[key] for d in batch]
         coords_batch = ret_dict['input_coords_list']

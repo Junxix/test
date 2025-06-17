@@ -10,7 +10,8 @@ TO_TENSOR_KEYS = [
     'action_normalized',
     'relative_action',  
     'relative_action_normalized',
-    'point_tracks'
+    'gripper_tracks',
+    'selected_tracks'
 ]
 
 REL_TRANS_MAX = 0.1  

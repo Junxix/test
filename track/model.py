@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from track.layers import PointPatchEmbedding, PerceiverBlock
+from track.layers import PointPatchEmbedding, CrossAttentionBlock, SelfAttentionBlock
 
 class PerceiverEncoder(nn.Module):
     def __init__(
@@ -30,11 +30,14 @@ class PerceiverEncoder(nn.Module):
         self.queries = nn.Parameter(torch.randn(1, num_queries, query_dim))
         nn.init.xavier_uniform_(self.queries)
         
-        self.blocks = nn.ModuleList([
-            PerceiverBlock(
-                query_dim, embed_dim, num_heads, ff_dim, dropout, 
-                use_rope=use_rope, max_seq_len=max_seq_len // patch_size
-            ) for _ in range(num_layers)
+        self.cross_attention_block = CrossAttentionBlock(
+            query_dim, embed_dim, num_heads, ff_dim, dropout, 
+            use_rope=use_rope, max_seq_len=max_seq_len // patch_size
+        )
+        
+        self.self_attention_blocks = nn.ModuleList([
+            SelfAttentionBlock(query_dim, num_heads, ff_dim, dropout) 
+            for _ in range(num_layers)
         ])
         
         self.final_norm = nn.LayerNorm(query_dim)
@@ -65,8 +68,10 @@ class PerceiverEncoder(nn.Module):
         
         queries = self.queries.expand(batch_size, -1, -1)
         
-        for block in self.blocks:
-            queries = block(queries, embedded, mask, input_positions)
+        queries = self.cross_attention_block(queries, embedded, mask, input_positions)
+        
+        for self_attn_block in self.self_attention_blocks:
+            queries = self_attn_block(queries)
         
         return self.final_norm(queries)
 

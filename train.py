@@ -93,14 +93,29 @@ def train(args_override):
         drop_last = True
     )
 
-    perceiver_config = {
-        'num_points': 2,      # shape (..., 2, 2)
-        'input_dim': 2,       # shape (..., 2, 2)
+    gripper_perceiver_config = {
+        'num_points': 2,      # 
+        'input_dim': 2,       # 2D
         'patch_size': 4,      
         'embed_dim': 256,
         'query_dim': 512,
-        'num_queries': 64,    
-        'num_layers': 4,
+        'num_queries': 4,     
+        'num_layers': 4,      
+        'num_heads': 8,
+        'ff_dim': 1024,
+        'dropout': 0.1,
+        'use_rope': True,
+        'output_dim': None    
+    }
+    
+    selected_perceiver_config = {
+        'num_points': 4,      
+        'input_dim': 2,       # 2D
+        'patch_size': 4,      
+        'embed_dim': 256,
+        'query_dim': 512,
+        'num_queries': 4,    
+        'num_layers': 4,   
         'num_heads': 8,
         'ff_dim': 1024,
         'dropout': 0.1,
@@ -121,7 +136,8 @@ def train(args_override):
         num_decoder_layers = args.num_decoder_layers,
         use_relative_action = False,
         dropout = args.dropout,
-        perceiver_config=perceiver_config 
+        gripper_perceiver_config = gripper_perceiver_config,  
+        selected_perceiver_config = selected_perceiver_config  
     ).to(device)
     if RANK == 0:
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -172,16 +188,22 @@ def train(args_override):
             cloud_feats = data['input_feats_list']
             action_data = data['action_normalized']
             relative_action_data = data.get('relative_action_normalized', None)
-            point_tracks_data = data.get('point_tracks', None) 
-            track_lengths_data = data.get('track_lengths', None) 
+            gripper_tracks_data = data.get('gripper_tracks', None) 
+            selected_tracks_data = data.get('selected_tracks', None)
+            gripper_track_lengths_data = data.get('gripper_track_lengths', None) 
+            selected_track_lengths_data = data.get('selected_track_lengths', None) 
 
             cloud_feats, cloud_coords, action_data = cloud_feats.to(device), cloud_coords.to(device), action_data.to(device)
             if relative_action_data is not None:
                 relative_action_data = relative_action_data.to(device)
-            if point_tracks_data is not None:
-                point_tracks_data = point_tracks_data.to(device)
-            if track_lengths_data is not None:
-                track_lengths_data = track_lengths_data.to(device)
+            if gripper_tracks_data is not None:
+                gripper_tracks_data = gripper_tracks_data.to(device)
+            if selected_tracks_data is not None:
+                selected_tracks_data = selected_tracks_data.to(device)
+            if gripper_track_lengths_data is not None:
+                gripper_track_lengths_data = gripper_track_lengths_data.to(device)
+            if selected_track_lengths_data is not None:
+                selected_track_lengths_data = selected_track_lengths_data.to(device)
             
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
             # forward
@@ -189,8 +211,10 @@ def train(args_override):
                 cloud=cloud_data, 
                 actions=action_data, 
                 relative_actions=relative_action_data, 
-                point_tracks=point_tracks_data, 
-                track_lengths=track_lengths_data, 
+                gripper_tracks=gripper_tracks_data,      #  (batch, seq_len, 2, 2)
+                selected_tracks=selected_tracks_data,    #  (batch, seq_len, 4, 2)
+                gripper_track_lengths=gripper_track_lengths_data,
+                selected_track_lengths=selected_track_lengths_data,
                 batch_size=action_data.shape[0]
             )
             

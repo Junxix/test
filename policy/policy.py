@@ -24,7 +24,8 @@ class RISE(nn.Module):
         dim_feedforward = 2048, 
         dropout = 0.1,
         use_relative_action=True,
-        perceiver_config=None 
+        gripper_perceiver_config=None,  # 手爪perceiver配置
+        selected_perceiver_config=None  # 随机点perceiver配置
     ):
         super().__init__()
         num_obs = 1
@@ -40,22 +41,50 @@ class RISE(nn.Module):
         self.action_decoder = DiffusionUNetPolicy(action_dim, num_action, num_obs, obs_feature_dim)
         self.readout_embed = nn.Embedding(1, hidden_dim)
 
-        if perceiver_config:
-            self.perceiver_encoder = PointPerceiver(**perceiver_config)
-            # todo
-            self.perceiver_fusion_layer = nn.Linear(perceiver_config['query_dim'], hidden_dim)
+        self.use_dual_perceiver = gripper_perceiver_config is not None and selected_perceiver_config is not None
+        
+        if self.use_dual_perceiver:
+            self.gripper_perceiver = PointPerceiver(**gripper_perceiver_config)
+            self.selected_perceiver = PointPerceiver(**selected_perceiver_config)
+            
+            total_tokens = gripper_perceiver_config['num_queries'] + selected_perceiver_config['num_queries']
+            
+            gripper_output_dim = gripper_perceiver_config['output_dim']
+            if gripper_output_dim is None:
+                gripper_output_dim = gripper_perceiver_config['query_dim']
+            
+            selected_output_dim = selected_perceiver_config['output_dim'] 
+            if selected_output_dim is None:
+                selected_output_dim = selected_perceiver_config['query_dim']
+                
+            assert gripper_output_dim == selected_output_dim, \
+                f"Gripper and selected perceiver output dims must match: {gripper_output_dim} vs {selected_output_dim}"
+            
+            self.perceiver_fusion_layer = nn.Linear(gripper_output_dim, hidden_dim)
+            
+            print(f"Dual Perceiver initialized:")
+            print(f"  - Gripper Perceiver: {gripper_perceiver_config['num_queries']} queries, output_dim={gripper_output_dim}")
+            print(f"  - Selected Perceiver: {selected_perceiver_config['num_queries']} queries, output_dim={selected_output_dim}") 
+            print(f"  - Total tokens: {total_tokens}")
         else:
-            self.perceiver_encoder = None
+            self.gripper_perceiver = None
+            self.selected_perceiver = None
 
-
-    def forward(self, cloud, actions = None, relative_actions=None, point_tracks=None, track_lengths=None, batch_size = 24):
+    def forward(self, cloud, actions = None, relative_actions=None, gripper_tracks=None, selected_tracks=None, 
+                gripper_track_lengths=None, selected_track_lengths=None, batch_size = 24):
+        
         if self.use_relative_action and relative_actions is not None:
             src, pos, src_padding_mask = self.sparse_encoder(cloud, relative_actions, batch_size=batch_size)
         else:
             src, pos, src_padding_mask = self.sparse_encoder(cloud, batch_size=batch_size)
 
-        if self.perceiver_encoder is not None and point_tracks is not None:
-            perceiver_tokens = self.perceiver_encoder(point_tracks, lengths=track_lengths)
+        if self.use_dual_perceiver and gripper_tracks is not None and selected_tracks is not None:
+            gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
+            selected_tokens = self.selected_perceiver(selected_tracks, lengths=selected_track_lengths)
+            
+            # gripper_tokens: (batch_size, 4, query_dim)
+            # selected_tokens: (batch_size, 4, query_dim)
+            perceiver_tokens = torch.cat([gripper_tokens, selected_tokens], dim=1)  # (batch_size, 8, query_dim)
             perceiver_tokens = self.perceiver_fusion_layer(perceiver_tokens)
 
             src = torch.cat([src, perceiver_tokens], dim=1)
@@ -68,6 +97,21 @@ class RISE(nn.Module):
                 dtype=torch.bool, device=src.device
             )
             src_padding_mask = torch.cat([src_padding_mask, perceiver_padding_mask], dim=1)
+
+        elif self.use_dual_perceiver and gripper_tracks is not None:
+            gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
+            gripper_tokens = self.perceiver_fusion_layer(gripper_tokens)
+
+            src = torch.cat([src, gripper_tokens], dim=1)
+
+            gripper_pos = torch.zeros_like(gripper_tokens)
+            pos = torch.cat([pos, gripper_pos], dim=1)
+
+            gripper_padding_mask = torch.zeros(
+                (batch_size, gripper_tokens.size(1)),
+                dtype=torch.bool, device=src.device
+            )
+            src_padding_mask = torch.cat([src_padding_mask, gripper_padding_mask], dim=1)
 
         readout = self.transformer(src, src_padding_mask, self.readout_embed.weight, pos)[-1]
         readout = readout[:, 0]

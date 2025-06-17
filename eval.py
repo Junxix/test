@@ -49,7 +49,7 @@ default_args = edict({
     "discretize_rotation": True,
     "ensemble_mode": "act",
     "use_relative_action": False,  
-    "use_perceiver": True 
+    "use_dual_perceiver": True 
 })
 
 
@@ -59,6 +59,12 @@ class TCPToImageConverter:
         self.camera_serial = camera_serial
         self.img_width = 1280
         self.img_height = 720
+        
+        # TODO
+        np.random.seed(42)  
+        self.random_points_normalized = np.random.uniform(
+            low=[0.1, 0.1], high=[0.9, 0.9], size=(4, 2)
+        ) 
         
         tcp_file = os.path.join(calib_dir, 'tcp.npy')
         extrinsics_file = os.path.join(calib_dir, 'extrinsics.npy')
@@ -107,16 +113,16 @@ class TCPToImageConverter:
     def tcp_to_normalized_coords(self, tcp_position):
         results = {}
         
+        # 左右手爪的偏移
         offsets = {'left': -0.019, 'right': 0.019}
         
+        # 计算手爪位置
         for side, offset in offsets.items():
             point = tcp_position.copy()
             point[1] += offset
             
             object_point_world = np.append(point, 1).reshape(-1, 1)
-            
             object_point_camera = self.M_cam_to_base @ object_point_world
-            
             object_point_pixel = self.camera_matrix @ object_point_camera
             object_point_pixel /= object_point_pixel[2]  
             
@@ -127,6 +133,10 @@ class TCPToImageConverter:
             normalized_y = pixel_y / self.img_height
             
             results[side] = np.array([normalized_x, normalized_y])
+        
+        # 添加4个随机点（在评估时保持固定位置）
+        for i in range(4):
+            results[f'random_{i}'] = self.random_points_normalized[i]
             
         return results
 
@@ -250,7 +260,7 @@ def compute_history_relative_actions(action_history, num_history):
     
     return relative_actions
 
-def create_dummy_point_tracks(batch_size=1, num_history=5, num_points=2):
+def create_dummy_point_tracks(batch_size=1, num_history=5, num_points=6):  # 修改：从2改为6
     track_length = num_history + 1
     dummy_tracks = torch.zeros(batch_size, track_length, num_points, 2)
     return dummy_tracks
@@ -267,66 +277,70 @@ def visualize_point_tracks(image, track_array, timestep):
     pixel_tracks[:, :, 1] *= img_height
     pixel_tracks = pixel_tracks.astype(int)
     
-    colors_bgr = {
-        'left': (255, 0, 0),   
-        'right': (0, 0, 255)  
-    }
+    # 定义6个点的颜色：左爪(蓝)、右爪(红)、4个随机点(绿色系)
+    colors_bgr = [
+        (255, 0, 0),   
+        (0, 0, 255),   
+        (0, 255, 0),   
+        (0, 255, 128),  
+        (0, 128, 255),  
+        (128, 255, 0)   
+    ]
     
-    for gripper_idx, (gripper_name, color) in enumerate(zip(['left', 'right'], colors_bgr.values())):
-        gripper_track = pixel_tracks[:, gripper_idx, :]  # shape: (seq_len, 2)
-        
-        # 绘制轨迹线（渐变透明度效果）
-        for i in range(1, len(gripper_track)):
-            pt1 = tuple(gripper_track[i-1])
-            pt2 = tuple(gripper_track[i])
+    point_names = ['left', 'right', 'rand1', 'rand2', 'rand3', 'rand4']
+    
+    for point_idx, (point_name, color) in enumerate(zip(point_names, colors_bgr)):
+        if point_idx >= track_array.shape[1]:
+            continue
             
-            # 渐变透明度：越新的线条越不透明
-            alpha = 0.3 + 0.7 * (i / len(gripper_track))
-            thickness = max(2, int(3 * alpha))
+        point_track = pixel_tracks[:, point_idx, :]  
+        
+        for i in range(1, len(point_track)):
+            pt1 = tuple(point_track[i-1])
+            pt2 = tuple(point_track[i])
+            
+            alpha = 0.3 + 0.7 * (i / len(point_track))
+            thickness = max(1, int(2 * alpha))
             
             cv2.line(vis_image, pt1, pt2, color, thickness=thickness)
         
-        # 绘制轨迹点
-        for i, point in enumerate(gripper_track):
-            # 确保坐标在图像范围内
+        for i, point in enumerate(point_track):
             x, y = point
             x = max(0, min(x, img_width - 1))
             y = max(0, min(y, img_height - 1))
             point = (x, y)
             
-            # 调整点的大小，最新的点更大
-            if i == len(gripper_track) - 1:  # 最新点
-                radius = 8
-                thickness = -1  # 填充
-                # 添加白色边框
-                cv2.circle(vis_image, point, radius + 2, (255, 255, 255), 2)
+            if i == len(point_track) - 1: 
+                radius = 6
+                thickness = -1
+                cv2.circle(vis_image, point, radius + 1, (255, 255, 255), 1)
             else:
-                alpha = 0.5 + 0.5 * (i / len(gripper_track))
-                radius = max(2, int(4 * alpha))
-                thickness = 2 if i < len(gripper_track) - 1 else -1
+                alpha = 0.5 + 0.5 * (i / len(point_track))
+                radius = max(2, int(3 * alpha))
+                thickness = 1
             
             cv2.circle(vis_image, point, radius, color, thickness)
         
-        if len(gripper_track) > 0:
-            label_pos = gripper_track[-1]  # 最新点位置
-            label_x = max(0, min(label_pos[0] + 15, img_width - 100))
-            label_y = max(20, min(label_pos[1] - 10, img_height - 10))
+        if len(point_track) > 0:
+            label_pos = point_track[-1]
+            label_x = max(0, min(label_pos[0] + 10, img_width - 50))
+            label_y = max(15, min(label_pos[1] - 5, img_height - 10))
             
-            cv2.putText(vis_image, gripper_name.upper(), (label_x, label_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.putText(vis_image, point_name.upper(), (label_x, label_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
     
     text_lines = [
         f"Step: {timestep}",
         f"Track Length: {len(track_array)}",
-        f"Left: Blue | Right: Red"
+        f"Points: L|R|Rand1-4"
     ]
     
     for i, text in enumerate(text_lines):
-        y_pos = 30 + i * 25
-        (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        cv2.rectangle(vis_image, (5, y_pos - text_height - 5), 
-                     (text_width + 15, y_pos + 5), (0, 0, 0), -1)
-        cv2.putText(vis_image, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        y_pos = 25 + i * 20
+        (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(vis_image, (5, y_pos - text_height - 3), 
+                     (text_width + 10, y_pos + 3), (0, 0, 0), -1)
+        cv2.putText(vis_image, text, (8, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     os.makedirs('./eval_visualization/', exist_ok=True)
     save_path = f'./eval_visualization/tracks_step_{timestep:04d}.jpg'
@@ -334,10 +348,10 @@ def visualize_point_tracks(image, track_array, timestep):
     print(f"Saved track visualization to {save_path}")
     
     try:
-        cv2.imshow('Gripper Point Tracks', vis_image)
-        cv2.waitKey(1)  # 非阻塞显示
+        cv2.imshow('Gripper Point Tracks (6 Points)', vis_image)
+        cv2.waitKey(1)
     except:
-        pass  # 在无GUI环境中忽略显示错误
+        pass
 
 
 def evaluate(args_override):
@@ -350,15 +364,31 @@ def evaluate(args_override):
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    perceiver_config = None
-    if args.use_perceiver:
-        perceiver_config = {
-            'num_points': 2,      
+    gripper_perceiver_config = None
+    selected_perceiver_config = None
+    if args.use_dual_perceiver:
+        gripper_perceiver_config = {
+            'num_points': 2,     
             'input_dim': 2,       
             'patch_size': 4,      
             'embed_dim': 256,
             'query_dim': 512,
-            'num_queries': 64,    
+            'num_queries': 4,     
+            'num_layers': 4,
+            'num_heads': 8,
+            'ff_dim': 1024,
+            'dropout': 0.1,
+            'use_rope': True,
+            'output_dim': None    
+        }
+        
+        selected_perceiver_config = {
+            'num_points': 4,      
+            'input_dim': 2,       
+            'patch_size': 4,      
+            'embed_dim': 256,
+            'query_dim': 512,
+            'num_queries': 4,    
             'num_layers': 4,
             'num_heads': 8,
             'ff_dim': 1024,
@@ -381,7 +411,8 @@ def evaluate(args_override):
         num_decoder_layers = args.num_decoder_layers,
         dropout = args.dropout,
         use_relative_action = args.use_relative_action,
-        perceiver_config = perceiver_config
+        gripper_perceiver_config = gripper_perceiver_config, 
+        selected_perceiver_config = selected_perceiver_config  
     ).to(device)
     n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print("Number of parameters: {:.2f}M".format(n_parameters / 1e6))
@@ -420,9 +451,13 @@ def evaluate(args_override):
             normalized_coords = tcp_converter.tcp_to_normalized_coords(tcp_position)
             
             current_track = np.array([
-                normalized_coords['left'],   # shape: (2,)
-                normalized_coords['right']   # shape: (2,)
-            ])  # shape: (2, 2)
+                normalized_coords['left'],     # shape: (2,)
+                normalized_coords['right'],    # shape: (2,)
+                normalized_coords['random_0'], # shape: (2,)
+                normalized_coords['random_1'], # shape: (2,)
+                normalized_coords['random_2'], # shape: (2,)
+                normalized_coords['random_3']  # shape: (2,)
+            ])  # shape: (6, 2)
             
             gripper_tracks_history.append(current_track)
             
@@ -448,29 +483,44 @@ def evaluate(args_override):
                     history_relative_normalized = normalize_relative_action(history_relative)
                     relative_actions = torch.from_numpy(history_relative_normalized).unsqueeze(0).to(device).float()
                 
-                if args.use_perceiver:
+                if args.use_dual_perceiver:
                     if len(gripper_tracks_history) > 0:
-                        track_array = np.array(gripper_tracks_history)  # shape: (seq_len, 2, 2)
+                        track_array = np.array(gripper_tracks_history)  # shape: (seq_len, 6, 2)
                         
-                        point_tracks = torch.from_numpy(track_array).unsqueeze(0).to(device).float()  # shape: (1, seq_len, 2, 2)
-                        track_lengths = torch.tensor([len(gripper_tracks_history)], dtype=torch.long, device=device)
+                        gripper_track_array = track_array[:, :2, :]  # 前2个点是gripper tracks
+                        selected_track_array = track_array[:, 2:, :]  # 后4个点是selected tracks
+                        
+                        gripper_tracks = torch.from_numpy(gripper_track_array).unsqueeze(0).to(device).float()  # (1, seq_len, 2, 2)
+                        selected_tracks = torch.from_numpy(selected_track_array).unsqueeze(0).to(device).float()  # (1, seq_len, 4, 2)
+                        gripper_track_lengths = torch.tensor([len(gripper_tracks_history)], dtype=torch.long, device=device)
+                        selected_track_lengths = torch.tensor([len(gripper_tracks_history)], dtype=torch.long, device=device)
+                        
                         colors_bgr = cv2.cvtColor(colors, cv2.COLOR_RGB2BGR)
                         track_array_vis = np.array(gripper_tracks_history)
                         visualize_point_tracks(colors_bgr, track_array_vis, t)
       
-                        print(f"Using real point tracks: shape={point_tracks.shape}, length={track_lengths.item()}")
+                        print(f"Using real dual tracks: gripper={gripper_tracks.shape}, selected={selected_tracks.shape}")
                     else:
-                        point_tracks = create_dummy_point_tracks(1, args.num_history).to(device)
-                        track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
-                        print("Using dummy point tracks")
+                        gripper_tracks = torch.zeros(1, args.num_history + 1, 2, 2).to(device)  # 2个点
+                        selected_tracks = torch.zeros(1, args.num_history + 1, 4, 2).to(device)  # 4个点
+                        gripper_track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
+                        selected_track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
+                        print("Using dummy dual tracks")
+                else:
+                    gripper_tracks = None
+                    selected_tracks = None
+                    gripper_track_lengths = None
+                    selected_track_lengths = None
                 
                 # predict
                 pred_raw_action = policy(
                     cloud=cloud_data, 
                     actions=None, 
                     relative_actions=relative_actions,
-                    point_tracks=point_tracks,
-                    track_lengths=track_lengths,
+                    gripper_tracks=gripper_tracks,           # (1, seq_len, 2, 2)
+                    selected_tracks=selected_tracks,         # (1, seq_len, 4, 2)
+                    gripper_track_lengths=gripper_track_lengths,
+                    selected_track_lengths=selected_track_lengths,
                     batch_size=1
                 ).squeeze(0).cpu().numpy()
                 
@@ -567,6 +617,6 @@ if __name__ == '__main__':
     parser.add_argument('--discretize_rotation', action = 'store_true', help = 'whether to discretize rotation process.')
     parser.add_argument('--ensemble_mode', action = 'store', type = str, help = 'temporal ensemble mode', required = False, default = 'new')
     parser.add_argument('--use_relative_action', action = 'store_true', help = 'whether to use relative action (should match training config)')
-    parser.add_argument('--use_perceiver', action = 'store_true', help = 'whether to use perceiver (should match training config)')
+    parser.add_argument('--use_dual_perceiver', action = 'store_true', help = 'whether to use dual perceiver (should match training config)')
 
     evaluate(vars(parser.parse_args()))

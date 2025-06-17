@@ -307,20 +307,62 @@ class RealWorldDataset(Dataset):
 
         track_path = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_left.npy")
         track_path_right = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_right.npy")
-        
-        if track_path in self.track_cache:
-            all_tracks = self.track_cache[track_path]
-        elif os.path.exists(track_path):
-            left_tracks = np.load(track_path)
-            right_tracks = np.load(track_path_right) 
-            all_tracks = np.stack([left_tracks, right_tracks], axis=1)
-            self.track_cache[track_path] = all_tracks
+        pred_tracks_path = os.path.join(data_path, "cam_{}".format(cam_id), "tracks", "pred_tracks.npy")
+
+        cache_key = f"{track_path}_{pred_tracks_path}_{cam_id}"
+
+        if cache_key in self.track_cache:
+            all_tracks = self.track_cache[cache_key]
+        elif os.path.exists(track_path) and os.path.exists(pred_tracks_path):
+            left_tracks = np.load(track_path)      # shape: (seq_len, 2)
+            right_tracks = np.load(track_path_right)  # shape: (seq_len, 2)
+            
+            pred_tracks = np.load(pred_tracks_path)  # shape: (1, 379, 118, 2)
+            pred_tracks = pred_tracks[0]  # (379, 118, 2)
+            
+            pred_tracks_normalized = pred_tracks.copy()
+            pred_tracks_normalized[:, :, 0] /= 1280.0  
+            pred_tracks_normalized[:, :, 1] /= 720.0   
+            
+            if pred_tracks_normalized.shape[1] >= 4:
+                selected_indices = np.random.choice(pred_tracks_normalized.shape[1], 4, replace=False)
+                selected_tracks = pred_tracks_normalized[:, selected_indices, :]  
+            else:
+                selected_indices = np.arange(pred_tracks_normalized.shape[1])
+                selected_tracks = pred_tracks_normalized[:, selected_indices, :]
+                while selected_tracks.shape[1] < 4:
+                    last_point = selected_tracks[:, -1:, :]
+                    selected_tracks = np.concatenate([selected_tracks, last_point], axis=1)
+                selected_tracks = selected_tracks[:, :4, :] 
+            
+            min_len = min(len(left_tracks), len(right_tracks), len(selected_tracks))
+            left_tracks = left_tracks[:min_len]
+            right_tracks = right_tracks[:min_len]  
+            selected_tracks = selected_tracks[:min_len]
+            
+            gripper_tracks = np.stack([left_tracks, right_tracks], axis=1)  # shape: (min_len, 2, 2)
+            
+            self.track_cache[cache_key] = {
+                'gripper_tracks': gripper_tracks,
+                'selected_tracks': selected_tracks
+            }
+            
+        # elif os.path.exists(track_path):
+        #     left_tracks = np.load(track_path)
+        #     right_tracks = np.load(track_path_right)
+        #     gripper_tracks = np.stack([left_tracks, right_tracks], axis=1)  # shape: (seq_len, 2, 2)
+        #     self.track_cache[cache_key] = {
+        #         'gripper_tracks': gripper_tracks,
+        #         'selected_tracks': None
+        #     }
         else:
+            raise FileNotFoundError(f"Track file not found: {track_path} or {pred_tracks_path}")
             all_tracks = None
 
-        if all_tracks is not None:
-            # TODO: check if the track length
-            track_slice = all_tracks[:track_idx + 1]
+        if cache_key in self.track_cache:
+            track_data = self.track_cache[cache_key]
+            gripper_track_slice = track_data['gripper_tracks'][:track_idx + 1] if track_data['gripper_tracks'] is not None else None
+            selected_track_slice = track_data['selected_tracks'][:track_idx + 1] if track_data['selected_tracks'] is not None else None
         else:
             raise FileNotFoundError(f"Track file not found: {track_path}")  
 
@@ -405,7 +447,9 @@ class RealWorldDataset(Dataset):
         actions_normalized = torch.from_numpy(actions_normalized).float()
         relative_actions = torch.from_numpy(relative_actions).float()
         relative_actions_normalized = torch.from_numpy(relative_actions_normalized).float()
-        point_tracks = torch.from_numpy(track_slice).float()
+        
+        gripper_tracks_tensor = torch.from_numpy(gripper_track_slice).float() if gripper_track_slice is not None else None
+        selected_tracks_tensor = torch.from_numpy(selected_track_slice).float() if selected_track_slice is not None else None
 
         ret_dict = {
             'input_coords_list': input_coords_list,
@@ -414,7 +458,8 @@ class RealWorldDataset(Dataset):
             'action_normalized': actions_normalized,
             'relative_action': relative_actions, 
             'relative_action_normalized': relative_actions_normalized,
-            'point_tracks': point_tracks 
+            'gripper_tracks': gripper_tracks_tensor,    #  shape: (seq_len, 2, 2)
+            'selected_tracks': selected_tracks_tensor   #  shape: (seq_len, 4, 2)
         }
         
         if self.with_cloud:  # warning: this may significantly slow down the training process.
@@ -432,16 +477,34 @@ def collate_fn(batch):
         ret_dict = {}
         for key in batch[0]:
             if key in TO_TENSOR_KEYS:
-                if key == 'point_tracks':
-                    point_tracks_list = [d[key] for d in batch]
-                    lengths = [pt.size(0) for pt in point_tracks_list]
-                    if len(set(lengths)) == 1:
-                        ret_dict[key] = torch.stack(point_tracks_list, 0)
-                        ret_dict['track_lengths'] = None
+                if key == 'gripper_tracks':
+                    gripper_tracks_list = [d[key] for d in batch if d[key] is not None]
+                    if len(gripper_tracks_list) > 0:
+                        lengths = [gt.size(0) for gt in gripper_tracks_list]
+                        if len(set(lengths)) == 1:
+                            ret_dict[key] = torch.stack(gripper_tracks_list, 0)
+                            ret_dict['gripper_track_lengths'] = None
+                        else:
+                            padded_batch, track_lengths = create_variable_length_batch(gripper_tracks_list)
+                            ret_dict[key] = padded_batch
+                            ret_dict['gripper_track_lengths'] = track_lengths
                     else:
-                        padded_batch, track_lengths = create_variable_length_batch(point_tracks_list)
-                        ret_dict[key] = padded_batch
-                        ret_dict['track_lengths'] = track_lengths
+                        ret_dict[key] = None
+                        ret_dict['gripper_track_lengths'] = None
+                elif key == 'selected_tracks':
+                    selected_tracks_list = [d[key] for d in batch if d[key] is not None]
+                    if len(selected_tracks_list) > 0:
+                        lengths = [st.size(0) for st in selected_tracks_list]
+                        if len(set(lengths)) == 1:
+                            ret_dict[key] = torch.stack(selected_tracks_list, 0)
+                            ret_dict['selected_track_lengths'] = None
+                        else:
+                            padded_batch, track_lengths = create_variable_length_batch(selected_tracks_list)
+                            ret_dict[key] = padded_batch
+                            ret_dict['selected_track_lengths'] = track_lengths
+                    else:
+                        ret_dict[key] = None
+                        ret_dict['selected_track_lengths'] = None
                 else:
                     ret_dict[key] = collate_fn([d[key] for d in batch])
             else:

@@ -9,11 +9,20 @@ import torch.nn as nn
 import MinkowskiEngine as ME
 import matplotlib.pyplot as plt
 import torch.distributed as dist
+import cv2
 
 from tqdm import tqdm
 from copy import deepcopy
 from easydict import EasyDict as edict
 from diffusers.optimization import get_cosine_schedule_with_warmup
+
+try:
+    from cotracker.utils.visualizer import Visualizer
+    from cotracker.predictor import CoTrackerOnlinePredictor
+    COTRACKER_AVAILABLE = True
+except ImportError:
+    print("No CoTracker available, using backup method.")
+    COTRACKER_AVAILABLE = False
 
 from policy import RISE
 from eval_agent import Agent
@@ -49,22 +58,75 @@ default_args = edict({
     "discretize_rotation": True,
     "ensemble_mode": "act",
     "use_relative_action": False,  
-    "use_dual_perceiver": True 
+    "use_dual_perceiver": True,
+    "cotracker_checkpoint": "/data/jingjing/pretrained-models/co-tracker/scaled_online.pth"  
 })
+
+
+class PointSelector:
+    def __init__(self):
+        self.points = []
+        self.image = None
+        self.original_image = None
+        
+    def mouse_callback(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN and len(self.points) < 4:
+            self.points.append([x, y])
+            print(f"choose {len(self.points)}: ({x}, {y})")
+            cv2.circle(self.image, (x, y), 8, (0, 255, 0), -1)
+            cv2.putText(self.image, str(len(self.points)), (x+10, y-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.imshow('choose 4 points', self.image)
+    
+    def select_points(self, image):
+        self.original_image = image.copy()
+        self.image = cv2.cvtColor(image.copy(), cv2.COLOR_RGB2BGR)
+        self.points = []
+        
+        cv2.imshow('choose 4 points', self.image)
+        cv2.setMouseCallback('choose 4 points', self.mouse_callback)
+        
+        print("please select 4 points on the image")
+        print("after selecting 4 points, press any key to continue, press r to reset")
+        
+        while len(self.points) < 4:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('r'):  
+                self.points = []
+                self.image = cv2.cvtColor(self.original_image.copy(), cv2.COLOR_RGB2BGR)
+                cv2.imshow('choose 4 points'', self.image)
+                print("already reset, please select 4 points again")
+        
+        print("already selected 4 points, press any key to continue")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        
+        return self.points
 
 
 class TCPToImageConverter:
     
-    def __init__(self, calib_dir, camera_serial="750612070851"):
+    def __init__(self, calib_dir, camera_serial="750612070851", cotracker_checkpoint=None):
         self.camera_serial = camera_serial
         self.img_width = 1280
         self.img_height = 720
         
-        # TODO
-        np.random.seed(42)  
-        self.random_points_normalized = np.random.uniform(
-            low=[0.1, 0.1], high=[0.9, 0.9], size=(4, 2)
-        ) 
+        self.cotracker = None
+        self.cotracker_initialized = False
+        self.selected_points_pixel = None  
+        self.point_tracks_history = [] 
+        
+        if COTRACKER_AVAILABLE and cotracker_checkpoint and os.path.exists(cotracker_checkpoint):
+            try:
+                self.cotracker = CoTrackerOnlinePredictor(checkpoint=cotracker_checkpoint)
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                self.cotracker = self.cotracker.to(device)
+                print(f"CoTracker已加载: {cotracker_checkpoint}")
+            except Exception as e:
+                print(f"CoTracker加载失败: {e}")
+                self.cotracker = None
+        
+        self.point_selector = PointSelector()
         
         tcp_file = os.path.join(calib_dir, 'tcp.npy')
         extrinsics_file = os.path.join(calib_dir, 'extrinsics.npy')
@@ -109,14 +171,102 @@ class TCPToImageConverter:
         self.M_cam_to_base = M_cam7506_to_A @ np.linalg.inv(M_cam0433_to_A) @ M_cam0433_to_end @ M_end_to_base
         
         self.camera_matrix = self.intrinsics[self.camera_serial]
+    
+    def initialize_tracking(self, first_frame):
+        if not self.cotracker:
+            raise RuntimeError("no cotracker available, please check the checkpoint path")
+            return False
+            
+        print("initializing CoTracker, please select 4 points on the first frame")
+        selected_points = self.point_selector.select_points(first_frame)
         
-    def tcp_to_normalized_coords(self, tcp_position):
+        if len(selected_points) != 4:
+            raise ValueError("must select exactly 4 points")
+            return False
+        
+        self.selected_points_pixel = np.array(selected_points)  # shape: (4, 2)
+        
+
+        queries = []
+        for point in selected_points:
+            queries.append([0, point[0], point[1]])  # frame 0
+        
+        device = next(self.cotracker.parameters()).device
+        self.cotracker_queries = torch.tensor([queries], dtype=torch.float32, device=device)
+        
+        frame_tensor = torch.from_numpy(first_frame).permute(2, 0, 1).unsqueeze(0).float().to(device)
+        frame_tensor = frame_tensor / 255.0  # [0,1]
+        
+        self.current_frame_idx = 0
+        self.frame_buffer = [frame_tensor]
+        
+        normalized_points = self.selected_points_pixel.copy()
+        normalized_points[:, 0] /= self.img_width
+        normalized_points[:, 1] /= self.img_height
+        self.point_tracks_history = [normalized_points]  
+        
+        self.cotracker_initialized = True
+        return True
+    
+    def update_tracking(self, new_frame):
+        if not self.cotracker_initialized:
+            print("CoTracker未初始化")
+            return None
+        
+        device = next(self.cotracker.parameters()).device
+        
+        frame_tensor = torch.from_numpy(new_frame).permute(2, 0, 1).unsqueeze(0).float().to(device)
+        frame_tensor = frame_tensor / 255.0
+        
+        self.current_frame_idx += 1
+        self.frame_buffer.append(frame_tensor)
+        
+        if len(self.frame_buffer) > self.cotracker.step * 2:
+            self.frame_buffer = self.frame_buffer[-self.cotracker.step * 2:]
+        
+        try:
+            video_chunk = torch.cat(self.frame_buffer, dim=0).unsqueeze(0)  # (1, T, C, H, W)
+            video_chunk = video_chunk.permute(0, 1, 2, 3, 4)  
+            
+            is_first_step = (self.current_frame_idx == 1)
+            
+            with torch.no_grad():
+                pred_tracks, pred_visibility = self.cotracker(
+                    video_chunk,
+                    is_first_step=is_first_step,
+                    queries=self.cotracker_queries if is_first_step else None,
+                    grid_size=0,
+                )
+            
+            latest_tracks = pred_tracks[0, -1, :, :].cpu().numpy()  # (num_points, 2)
+            
+            normalized_tracks = latest_tracks.copy()
+            normalized_tracks[:, 0] /= self.img_width
+            normalized_tracks[:, 1] /= self.img_height
+            
+            self.point_tracks_history.append(normalized_tracks)
+            
+            return normalized_tracks
+            
+        except Exception as e:
+            print(f"Failure: {e}")
+            if len(self.point_tracks_history) > 0:
+                return self.point_tracks_history[-1]
+            return None
+
+    def tcp_to_normalized_coords(self, tcp_position, current_frame=None):
+        """
+        Args:
+            tcp_position: TCP position in 3D
+            current_frame: current RGB frame for tracking update
+            
+        Returns:
+            dict: contains 'left', 'right' gripper points and 4 tracked points
+        """
         results = {}
         
-        # 左右手爪的偏移
         offsets = {'left': -0.019, 'right': 0.019}
         
-        # 计算手爪位置
         for side, offset in offsets.items():
             point = tcp_position.copy()
             point[1] += offset
@@ -134,9 +284,29 @@ class TCPToImageConverter:
             
             results[side] = np.array([normalized_x, normalized_y])
         
-        # 添加4个随机点（在评估时保持固定位置）
-        for i in range(4):
-            results[f'random_{i}'] = self.random_points_normalized[i]
+        if current_frame is not None and self.cotracker_initialized:
+            tracked_points = self.update_tracking(current_frame)
+            if tracked_points is not None:
+                for i in range(4):
+                    results[f'tracked_{i}'] = tracked_points[i]
+            else:
+                raise RuntimeError("Tracking failed, no valid points returned.")
+                if len(self.point_tracks_history) > 0:
+                    last_tracked = self.point_tracks_history[-1]
+                    for i in range(4):
+                        results[f'tracked_{i}'] = last_tracked[i]
+                else:
+                    for i in range(4):
+                        results[f'tracked_{i}'] = np.array([0.5 + i*0.1, 0.5])
+        else:
+            raise RuntimeError("Tracking not initialized or no current frame provided.")
+            if len(self.point_tracks_history) > 0:
+                last_tracked = self.point_tracks_history[-1]
+                for i in range(4):
+                    results[f'tracked_{i}'] = last_tracked[i]
+            else:
+                for i in range(4):
+                    results[f'tracked_{i}'] = np.array([0.5 + i*0.1, 0.5])
             
         return results
 
@@ -260,7 +430,7 @@ def compute_history_relative_actions(action_history, num_history):
     
     return relative_actions
 
-def create_dummy_point_tracks(batch_size=1, num_history=5, num_points=6):  # 修改：从2改为6
+def create_dummy_point_tracks(batch_size=1, num_history=5, num_points=6):
     track_length = num_history + 1
     dummy_tracks = torch.zeros(batch_size, track_length, num_points, 2)
     return dummy_tracks
@@ -277,17 +447,17 @@ def visualize_point_tracks(image, track_array, timestep):
     pixel_tracks[:, :, 1] *= img_height
     pixel_tracks = pixel_tracks.astype(int)
     
-    # 定义6个点的颜色：左爪(蓝)、右爪(红)、4个随机点(绿色系)
+    # 定义6个点的颜色：左爪(蓝)、右爪(红)、4个追踪点(绿色系)
     colors_bgr = [
-        (255, 0, 0),   
-        (0, 0, 255),   
-        (0, 255, 0),   
-        (0, 255, 128),  
-        (0, 128, 255),  
-        (128, 255, 0)   
+        (255, 0, 0),   # 左爪
+        (0, 0, 255),   # 右爪
+        (0, 255, 0),   # 追踪点1
+        (0, 255, 128), # 追踪点2
+        (0, 128, 255), # 追踪点3
+        (128, 255, 0)  # 追踪点4
     ]
     
-    point_names = ['left', 'right', 'rand1', 'rand2', 'rand3', 'rand4']
+    point_names = ['left', 'right', 'track1', 'track2', 'track3', 'track4']
     
     for point_idx, (point_name, color) in enumerate(zip(point_names, colors_bgr)):
         if point_idx >= track_array.shape[1]:
@@ -332,7 +502,7 @@ def visualize_point_tracks(image, track_array, timestep):
     text_lines = [
         f"Step: {timestep}",
         f"Track Length: {len(track_array)}",
-        f"Points: L|R|Rand1-4"
+        f"Points: L|R|CoTracker1-4"
     ]
     
     for i, text in enumerate(text_lines):
@@ -348,7 +518,7 @@ def visualize_point_tracks(image, track_array, timestep):
     print(f"Saved track visualization to {save_path}")
     
     try:
-        cv2.imshow('Gripper Point Tracks (6 Points)', vis_image)
+        cv2.imshow('Gripper Point Tracks with CoTracker', vis_image)
         cv2.waitKey(1)
     except:
         pass
@@ -432,9 +602,16 @@ def evaluate(args_override):
     projector = Projector(args.calib)
     ensemble_buffer = EnsembleBuffer(mode = args.ensemble_mode)
     
-    tcp_converter = TCPToImageConverter(args.calib, agent.camera_serial)
+    tcp_converter = TCPToImageConverter(
+        args.calib, 
+        agent.camera_serial,
+        cotracker_checkpoint=args.cotracker_checkpoint
+    )
     
     gripper_tracks_history = []  
+    
+    # 在第一帧初始化点追踪
+    first_frame_initialized = False
     
     if args.discretize_rotation:
         last_rot = np.array(agent.ready_rot_6d, dtype = np.float32)
@@ -448,15 +625,27 @@ def evaluate(args_override):
             robot_tcp = agent.robot.get_tcp_pose()
             tcp_position = robot_tcp[:3]
             
-            normalized_coords = tcp_converter.tcp_to_normalized_coords(tcp_position)
+            colors, depths = agent.get_observation()
+            
+            # 在第一帧初始化追踪
+            if not first_frame_initialized:
+                success = tcp_converter.initialize_tracking(colors)
+                if not success:
+                    raise RuntimeError("CoTracker initialization failed, please check the checkpoint path.")
+                first_frame_initialized = True
+            
+            normalized_coords = tcp_converter.tcp_to_normalized_coords(
+                tcp_position, 
+                current_frame=colors
+            )
             
             current_track = np.array([
-                normalized_coords['left'],     # shape: (2,)
-                normalized_coords['right'],    # shape: (2,)
-                normalized_coords['random_0'], # shape: (2,)
-                normalized_coords['random_1'], # shape: (2,)
-                normalized_coords['random_2'], # shape: (2,)
-                normalized_coords['random_3']  # shape: (2,)
+                normalized_coords['left'],       # shape: (2,)
+                normalized_coords['right'],      # shape: (2,)
+                normalized_coords['tracked_0'],  # shape: (2,)
+                normalized_coords['tracked_1'],  # shape: (2,)
+                normalized_coords['tracked_2'],  # shape: (2,)
+                normalized_coords['tracked_3']   # shape: (2,)
             ])  # shape: (6, 2)
             
             gripper_tracks_history.append(current_track)
@@ -464,7 +653,6 @@ def evaluate(args_override):
             
             if t % args.num_inference_step == 0:
                 # pre-process inputs
-                colors, depths = agent.get_observation()
                 coords, feats, cloud = create_input(
                     colors,
                     depths,
@@ -487,11 +675,11 @@ def evaluate(args_override):
                     if len(gripper_tracks_history) > 0:
                         track_array = np.array(gripper_tracks_history)  # shape: (seq_len, 6, 2)
                         
-                        gripper_track_array = track_array[:, :2, :]  # 前2个点是gripper tracks
-                        selected_track_array = track_array[:, 2:, :]  # 后4个点是selected tracks
+                        gripper_track_array = track_array[:, :2, :]  # 
+                        selected_track_array = track_array[:, 2:, :]  # 
                         
-                        gripper_tracks = torch.from_numpy(gripper_track_array).unsqueeze(0).to(device).float()  # (1, seq_len, 2, 2)
-                        selected_tracks = torch.from_numpy(selected_track_array).unsqueeze(0).to(device).float()  # (1, seq_len, 4, 2)
+                        gripper_tracks = torch.from_numpy(gripper_track_array).unsqueeze(0).to(device).float()
+                        selected_tracks = torch.from_numpy(selected_track_array).unsqueeze(0).to(device).float()
                         gripper_track_lengths = torch.tensor([len(gripper_tracks_history)], dtype=torch.long, device=device)
                         selected_track_lengths = torch.tensor([len(gripper_tracks_history)], dtype=torch.long, device=device)
                         
@@ -499,10 +687,10 @@ def evaluate(args_override):
                         track_array_vis = np.array(gripper_tracks_history)
                         visualize_point_tracks(colors_bgr, track_array_vis, t)
       
-                        print(f"Using real dual tracks: gripper={gripper_tracks.shape}, selected={selected_tracks.shape}")
+                        print(f"Using CoTracker dual tracks: gripper={gripper_tracks.shape}, selected={selected_tracks.shape}")
                     else:
-                        gripper_tracks = torch.zeros(1, args.num_history + 1, 2, 2).to(device)  # 2个点
-                        selected_tracks = torch.zeros(1, args.num_history + 1, 4, 2).to(device)  # 4个点
+                        gripper_tracks = torch.zeros(1, args.num_history + 1, 2, 2).to(device)
+                        selected_tracks = torch.zeros(1, args.num_history + 1, 4, 2).to(device)
                         gripper_track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
                         selected_track_lengths = torch.tensor([args.num_history + 1], dtype=torch.long, device=device)
                         print("Using dummy dual tracks")
@@ -517,8 +705,8 @@ def evaluate(args_override):
                     cloud=cloud_data, 
                     actions=None, 
                     relative_actions=relative_actions,
-                    gripper_tracks=gripper_tracks,           # (1, seq_len, 2, 2)
-                    selected_tracks=selected_tracks,         # (1, seq_len, 4, 2)
+                    gripper_tracks=gripper_tracks,
+                    selected_tracks=selected_tracks,
                     gripper_track_lengths=gripper_track_lengths,
                     selected_track_lengths=selected_track_lengths,
                     batch_size=1
@@ -593,7 +781,7 @@ def evaluate(args_override):
                 prev_width = step_width
     
     agent.stop()
-
+    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
@@ -618,5 +806,6 @@ if __name__ == '__main__':
     parser.add_argument('--ensemble_mode', action = 'store', type = str, help = 'temporal ensemble mode', required = False, default = 'new')
     parser.add_argument('--use_relative_action', action = 'store_true', help = 'whether to use relative action (should match training config)')
     parser.add_argument('--use_dual_perceiver', action = 'store_true', help = 'whether to use dual perceiver (should match training config)')
+    parser.add_argument('--cotracker_checkpoint', action = 'store', type = str, help = 'path to CoTracker checkpoint', required = False, default = "/data/jingjing/pretrained-models/co-tracker/scaled_online.pth")
 
     evaluate(vars(parser.parse_args()))

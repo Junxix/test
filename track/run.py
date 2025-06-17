@@ -24,12 +24,13 @@ if __name__ == "__main__":
     
     model = PointPerceiver(**config)
     
-    seq1 = torch.randn(12, 32, 2)
-    seq2 = torch.randn(16, 32, 2)
+    seq1 = torch.randn(8, 32, 2)
+    # seq2 = torch.randn(16, 32, 2)
     seq3 = torch.randn(8, 32, 2)
     
-    padded_batch, lengths = create_variable_length_batch([seq1, seq2, seq3])
-    
+    # padded_batch, lengths = create_variable_length_batch([seq1, seq2, seq3])
+    padded_batch, lengths = create_variable_length_batch([seq1, seq3])
+
     with torch.no_grad():
         output = model(padded_batch, lengths)
         print(f"padded_batch.shape: {padded_batch.shape}")

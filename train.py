@@ -94,9 +94,9 @@ def train(args_override):
     )
 
     perceiver_config = {
-        'num_points': 2,      # 根据数据 shape (..., 2, 2)
-        'input_dim': 2,       # 根据数据 shape (..., 2, 2)
-        'patch_size': 4,      # 沿时间维度的patch大小
+        'num_points': 2,      # shape (..., 2, 2)
+        'input_dim': 2,       # shape (..., 2, 2)
+        'patch_size': 4,      
         'embed_dim': 256,
         'query_dim': 512,
         'num_queries': 64,    

@@ -1,4 +1,3 @@
-
 import os
 import time
 import json
@@ -113,15 +112,15 @@ class TCPToImageConverter:
         
         self.cotracker = None
         self.cotracker_initialized = False
-        self.selected_points_pixel = None  
-        self.point_tracks_history = [] 
+        self.selected_points_pixel = None
         
+        self.point_tracks_history = [] 
+        self.last_cotracker_update_frame = -1  
 
         self.cotracker = CoTrackerOnlinePredictor(checkpoint=cotracker_checkpoint)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.cotracker = self.cotracker.to(device)
-    
-
+        self.cotracker_step = self.cotracker.step  
 
         self.point_selector = PointSelector()
         
@@ -192,7 +191,7 @@ class TCPToImageConverter:
 
         device = next(self.cotracker.parameters()).device
         self.cotracker_queries = torch.tensor([queries], dtype=torch.float32, device=device)
-        print(self.cotracker_queries.shape)
+        print(f"CoTracker queries shape: {self.cotracker_queries.shape}")
         
         frame_tensor = torch.from_numpy(first_frame).permute(2, 0, 1).unsqueeze(0).float().to(device)
         frame_tensor = frame_tensor / 255.0  # [0,1]
@@ -204,7 +203,8 @@ class TCPToImageConverter:
         normalized_points = normalized_points.astype(np.float64) 
         normalized_points[:, 0] /= self.img_width
         normalized_points[:, 1] /= self.img_height
-        self.point_tracks_history = [normalized_points]  
+        self.point_tracks_history = [normalized_points]
+        self.last_cotracker_update_frame = 0
 
         self.cotracker_initialized = True
         return True
@@ -213,66 +213,50 @@ class TCPToImageConverter:
         device = next(self.cotracker.parameters()).device
         
         frame_tensor = torch.from_numpy(new_frame).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
-
         self.frame_buffer.append(frame_tensor)
         self.current_frame_idx += 1
         
 
-        required_frames = self.cotracker.step * 2
-
-        video_chunk_frames = self.frame_buffer[-required_frames:]
-        video_chunk = torch.cat(video_chunk_frames, dim=0).unsqueeze(0)  # (1, T, C, H, W)
+        should_run_cotracker = False
+        required_frames = self.cotracker_step * 2
+        if self.current_frame_idx == 1 or (len(self.frame_buffer) >= required_frames and self.current_frame_idx % self.cotracker.step == 0):
+            should_run_cotracker = True
         
-
+        cotracker_ran = False
         
-        is_first_step = (self.current_frame_idx == 1)
-    
-        with torch.no_grad():
-            if is_first_step:
-                result = self.cotracker(
-                    video_chunk,
-                    is_first_step=True,
-                    queries=self.cotracker_queries,
-                    grid_size=0,
-                )
-                if result == (None, None):
-
-                    return self.point_tracks_history[-1]
-            else:
-                if len(self.frame_buffer) < required_frames or self.current_frame_idx % self.cotracker.step != 0:
-                    return self.point_tracks_history[-1]
-
-                pred_tracks, pred_visibility = self.cotracker(
-                    video_chunk,
-                    is_first_step=False,
-                    grid_size=0,
-                )
-                
-                if pred_tracks is not None:
-                    latest_tracks = pred_tracks[0, -1, :, :].cpu().numpy()  # (num_points, 2)
-                    
-                    normalized_tracks = latest_tracks.copy()
-                    normalized_tracks[:, 0] /= self.img_width
-                    normalized_tracks[:, 1] /= self.img_height
-                    
-                    self.point_tracks_history.append(normalized_tracks)
-                    return normalized_tracks
-                
-
-        return normalized_tracks
-
-    def tcp_to_normalized_coords(self, tcp_position, current_frame=None):
-        """
-        Args:
-            tcp_position: TCP position in 3D
-            current_frame: current RGB frame for tracking update
+        if should_run_cotracker:
+            video_chunk_frames = self.frame_buffer[-required_frames:]
+            video_chunk = torch.cat(video_chunk_frames, dim=0).unsqueeze(0)  # (1, T, C, H, W)
             
-        Returns:
-            dict: contains 'left', 'right' gripper points and 4 tracked points
-        """
-        results = {}
+            is_first_step = (self.current_frame_idx == 1)
         
-        offsets = {'left': -0.019, 'right': 0.019}
+            with torch.no_grad():
+                if is_first_step:
+                    result = self.cotracker(
+                        video_chunk,
+                        is_first_step=True,
+                        queries=self.cotracker_queries,
+                        grid_size=0,
+                    )
+                    if result == (None, None):
+                        return self._get_current_track(), False
+                else:
+                    pred_tracks, pred_visibility = self.cotracker(
+                        video_chunk,
+                        is_first_step=False,
+                        grid_size=0,
+                    )
+                    
+                    if pred_tracks is not None:
+                        cotracker_ran = self._update_track_history_with_cotracker_result(pred_tracks)
+                        return self._get_current_track(), cotracker_ran
+        
+        return self._get_current_track(), cotracker_ran
+    
+    def get_gripper_coordinates_for_frame(self, tcp_position, gripper_width, frame_idx):
+        results = {}
+
+        offsets = {'left': -1 * gripper_width/2, 'right': gripper_width/2}
         
         for side, offset in offsets.items():
             point = tcp_position.copy()
@@ -290,9 +274,67 @@ class TCPToImageConverter:
             normalized_y = pixel_y / self.img_height
             
             results[side] = np.array([normalized_x, normalized_y])
+        
+        return results
+    
+    def _update_track_history_with_cotracker_result(self, pred_tracks):
+        """
+        pred_tracks: shape (1, T, num_points, 2) - T
+        """
+        tracks_np = pred_tracks[0].cpu().numpy()  # (T, num_points, 2)
+        T, num_points, _ = tracks_np.shape
+        
+        normalized_tracks = tracks_np.copy()
+        normalized_tracks[:, :, 0] /= self.img_width
+        normalized_tracks[:, :, 1] /= self.img_height
+        
+        start_frame = self.current_frame_idx - T + 1
+        end_frame = self.current_frame_idx
+        
+        while len(self.point_tracks_history) <= end_frame:
+            if len(self.point_tracks_history) > 0:
+                self.point_tracks_history.append(self.point_tracks_history[-1].copy())
+            else:
+                raise RuntimeError("No track history available to fill gaps.")
+        
+        for i, frame_idx in enumerate(range(start_frame, end_frame + 1)):
+            if frame_idx >= 0: 
+                self.point_tracks_history[frame_idx] = normalized_tracks[i]
+        
+        self.last_cotracker_update_frame = self.current_frame_idx
+        
+        print(f"Updated track history from frame {start_frame} to {end_frame}")
+        
+        return True
+    
+    def _get_current_track(self):
+        if self.current_frame_idx < len(self.point_tracks_history):
+            return self.point_tracks_history[self.current_frame_idx]
+        elif len(self.point_tracks_history) > 0:
+            return self.point_tracks_history[-1]
+        else:
+            raise RuntimeError("No track history available")
 
+    def tcp_to_normalized_coords(self, tcp_position, gripper_width, current_frame=None):
+        """
+        Args:
+            tcp_position: TCP position in 3D
+            current_frame: current RGB frame for tracking update
+            
+        Returns:
+            tuple: (results_dict, cotracker_ran)
+                results_dict: contains 'left', 'right' gripper points and 4 tracked points
+                cotracker_ran: boolean indicating if CoTracker was executed this frame
+        """
+        results = {}
+        
+        gripper_coords = self.get_gripper_coordinates_for_frame(tcp_position, gripper_width, self.current_frame_idx)
+        results.update(gripper_coords)
+
+        cotracker_ran = False
+        
         if current_frame is not None and self.cotracker_initialized:
-            tracked_points = self.update_tracking(current_frame)
+            tracked_points, cotracker_ran = self.update_tracking(current_frame)
             if tracked_points is not None:
                 for i in range(4):
                     results[f'tracked_{i}'] = tracked_points[i]
@@ -301,7 +343,13 @@ class TCPToImageConverter:
         else:
             raise RuntimeError("Tracking not initialized or no current frame provided.")
             
-        return results
+        return results, cotracker_ran
+    
+    def get_complete_track_history(self):
+        if len(self.point_tracks_history) == 0:
+            return []
+        
+        return self.point_tracks_history
 
 
 def create_point_cloud(colors, depths, cam_intrinsics, voxel_size = 0.005):
@@ -428,6 +476,52 @@ def create_dummy_point_tracks(batch_size=1, num_history=5, num_points=6):
     dummy_tracks = torch.zeros(batch_size, track_length, num_points, 2)
     return dummy_tracks
 
+class TrackHistoryManager:
+
+    def __init__(self, tcp_converter):
+        self.tcp_converter = tcp_converter
+        self.tcp_history = []  
+        self.gripper_tracks_history = []  
+        
+    def add_current_step(self, tcp_position, normalized_coords):
+        self.tcp_history.append(tcp_position.copy())
+        
+        current_track = np.array([
+            normalized_coords['left'],       # shape: (2,)
+            normalized_coords['right'],      # shape: (2,)
+            normalized_coords['tracked_0'],  # shape: (2,)
+            normalized_coords['tracked_1'],  # shape: (2,)
+            normalized_coords['tracked_2'],  # shape: (2,)
+            normalized_coords['tracked_3']   # shape: (2,)
+        ])  # shape: (6, 2)
+        
+        while len(self.gripper_tracks_history) <= len(self.tcp_history) - 1:
+            self.gripper_tracks_history.append(np.zeros((6, 2)))
+        
+        current_frame_idx = len(self.tcp_history) - 1
+        self.gripper_tracks_history[current_frame_idx] = current_track
+        
+    def update_with_cotracker_result(self):
+        if len(self.tcp_history) == 0:
+            return
+            
+        cotracker_history = self.tcp_converter.point_tracks_history
+        
+        print(f"Updating CoTracker points. TCP history length: {len(self.tcp_history)}, CoTracker history length: {len(cotracker_history)}")
+        
+        for frame_idx in range(len(self.gripper_tracks_history)):
+            if frame_idx < len(cotracker_history):
+                cotracker_points = cotracker_history[frame_idx]
+                
+                if frame_idx < len(self.gripper_tracks_history):
+                    self.gripper_tracks_history[frame_idx][2:6] = cotracker_points
+            
+        print(f"Updated CoTracker points in gripper tracks history. History length: {len(self.gripper_tracks_history)}")
+    
+    def get_track_history(self):
+        return self.gripper_tracks_history
+
+
 def visualize_point_tracks(image, track_array, timestep):
     import cv2
     
@@ -440,7 +534,6 @@ def visualize_point_tracks(image, track_array, timestep):
     pixel_tracks[:, :, 1] *= img_height
     pixel_tracks = pixel_tracks.astype(int)
     
-    # 定义6个点的颜色：左爪(蓝)、右爪(红)、4个追踪点(绿色系)
     colors_bgr = [
         (255, 0, 0),   # 左爪
         (0, 0, 255),   # 右爪
@@ -455,16 +548,13 @@ def visualize_point_tracks(image, track_array, timestep):
     for point_idx, (point_name, color) in enumerate(zip(point_names, colors_bgr)):
         if point_idx >= track_array.shape[1]:
             continue
-            
         point_track = pixel_tracks[:, point_idx, :]  
         
         for i in range(1, len(point_track)):
             pt1 = tuple(point_track[i-1])
             pt2 = tuple(point_track[i])
-            
             alpha = 0.3 + 0.7 * (i / len(point_track))
             thickness = max(1, int(2 * alpha))
-            
             cv2.line(vis_image, pt1, pt2, color, thickness=thickness)
         
         for i, point in enumerate(point_track):
@@ -472,7 +562,6 @@ def visualize_point_tracks(image, track_array, timestep):
             x = max(0, min(x, img_width - 1))
             y = max(0, min(y, img_height - 1))
             point = (x, y)
-            
             if i == len(point_track) - 1: 
                 radius = 6
                 thickness = -1
@@ -509,7 +598,6 @@ def visualize_point_tracks(image, track_array, timestep):
     save_path = f'./eval_visualization/tracks_step_{timestep:04d}.jpg'
     cv2.imwrite(save_path, vis_image)
     
-
 
 def evaluate(args_override):
     # load default arguments
@@ -595,7 +683,7 @@ def evaluate(args_override):
         cotracker_checkpoint=args.cotracker_checkpoint
     )
     
-    gripper_tracks_history = []  
+    track_manager = TrackHistoryManager(tcp_converter)
     
     first_frame_initialized = False
     
@@ -609,6 +697,7 @@ def evaluate(args_override):
         
         for t in range(args.max_steps):
             robot_tcp = agent.robot.get_tcp_pose()
+            gripper_width = agent.get_gripper_width()
             tcp_position = robot_tcp[:3]
             
             colors, depths = agent.get_observation()
@@ -619,21 +708,18 @@ def evaluate(args_override):
                     raise RuntimeError("CoTracker initialization failed, please check the checkpoint path.")
                 first_frame_initialized = True
             
-            normalized_coords = tcp_converter.tcp_to_normalized_coords(
+            normalized_coords, cotracker_ran = tcp_converter.tcp_to_normalized_coords(
                 tcp_position, 
+                gripper_width,
                 current_frame=colors
             )
 
-            current_track = np.array([
-                normalized_coords['left'],       # shape: (2,)
-                normalized_coords['right'],      # shape: (2,)
-                normalized_coords['tracked_0'],  # shape: (2,)
-                normalized_coords['tracked_1'],  # shape: (2,)
-                normalized_coords['tracked_2'],  # shape: (2,)
-                normalized_coords['tracked_3']   # shape: (2,)
-            ])  # shape: (6, 2)
+            track_manager.add_current_step(tcp_position, normalized_coords)
             
-            gripper_tracks_history.append(current_track)
+            if cotracker_ran:
+                track_manager.update_with_cotracker_result()
+            
+            gripper_tracks_history = track_manager.get_track_history()
             
 
             if t % args.num_inference_step == 0:

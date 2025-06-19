@@ -1,14 +1,15 @@
+
+
 """
 Evaluation Agent.
 """
 
 import time
 import numpy as np
-from device.robot.flexiv import FlexivRobot
+from device.robot.flexiv_api import FlexivApi
 from utils.transformation import xyz_rot_transform
 from device.gripper.dahuan import DahuanModbusGripper
 from device.camera.realsense import RealSenseRGBDCamera
-
 
 class Agent:
     """
@@ -27,7 +28,7 @@ class Agent:
         self.camera_serial = camera_serial
 
         print("Init robot, gripper, and camera.")
-        self.robot = FlexivRobot(robot_ip_address = robot_ip, pc_ip_address = pc_ip)
+        self.robot = FlexivApi(serial="Rizon4-062027", with_streaming = True)
         self.robot.send_tcp_pose(self.ready_pose)
         time.sleep(1.5)
         
@@ -51,19 +52,14 @@ class Agent:
     
     @property
     def ready_pose(self):
-        return np.array([0.5, 0.0, 0.17, 0.0, 0.0, 1.0, 0.0])
-
+        return np.array([0.4, 0.0, 0.22, 0.0, 0.0, 1.0, 0.0])
     @property
     def ready_rot_6d(self):
         return np.array([-1, 0, 0, 0, 1, 0])
 
     def get_observation(self):
         colors, depths = self.camera.get_rgbd_image()
-        return colors, 
-    
-    def get_tcp_pose(self):
-        tcp_pose = self.robot.get_tcp_pose()
-        return tcp_pose
+        return colors, depths
     
     def set_tcp_pose(self, pose, rotation_rep, rotation_rep_convention = None, blocking = False):
         tcp_pose = xyz_rot_transform(
@@ -74,7 +70,11 @@ class Agent:
         )
         self.robot.send_tcp_pose(tcp_pose)
         if blocking:
-            time.sleep(0.1)
+            time.sleep(0.05)
+            
+    def get_tcp_pose(self):
+        tcp_pose = self.robot.get_tcp_pose()
+        return tcp_pose
     
     def set_gripper_width(self, width, blocking = False):
         width = int(np.clip(width / 0.095 * 1000., 0, 1000))
@@ -82,6 +82,10 @@ class Agent:
         if blocking:
             time.sleep(0.5)
     
+    def get_gripper_width(self):
+        width = self.gripper.get_info()[0]
+        return width / 1000. * 0.095
+
     def stop(self):
         self.robot.stop()
     

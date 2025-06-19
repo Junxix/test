@@ -63,9 +63,11 @@ class RealWorldDataset(Dataset):
         aug_jitter_params = [0.4, 0.4, 0.2, 0.1],
         aug_jitter_prob = 0.2,
         with_cloud = False,
-        vis = False
+        vis = False,
+        num_targets = 2  
     ):
         assert split in ['train', 'val', 'all']
+        assert num_targets in [1, 2], "num_targets must be 1 or 2"
 
         self.path = path
         self.split = split
@@ -85,6 +87,7 @@ class RealWorldDataset(Dataset):
         self.aug_jitter_prob = aug_jitter_prob
         self.with_cloud = with_cloud
         self.vis = vis
+        self.num_targets = num_targets  
         
         self.all_demos = sorted(os.listdir(self.data_path))
         self.num_demos = len(self.all_demos)
@@ -242,6 +245,73 @@ class RealWorldDataset(Dataset):
         
         return relative_tcp_list
 
+    def _load_target_tracks(self, data_path, cam_id):
+        """
+        Returns:
+            selected_tracks: shape (seq_len, 4, 2)
+        """
+        tracks_dir = os.path.join(data_path, "cam_{}".format(cam_id), "tracks")
+        
+        if self.num_targets == 1:
+            target1_path = os.path.join(tracks_dir, "pred_tracks_target_1.npy")
+            if not os.path.exists(target1_path):
+                raise FileNotFoundError(f"Target 1 track file not found: {target1_path}")
+            
+            pred_tracks = np.load(target1_path)  # shape: (1, seq_len, num_points, 2)
+            pred_tracks = pred_tracks[0]  # (seq_len, num_points, 2)
+            
+            pred_tracks_normalized = pred_tracks.copy()
+            pred_tracks_normalized[:, :, 0] /= 1280.0  
+            pred_tracks_normalized[:, :, 1] /= 720.0   
+            
+            if pred_tracks_normalized.shape[1] >= 4:
+                selected_indices = np.random.choice(pred_tracks_normalized.shape[1], 4, replace=False)
+                selected_tracks = pred_tracks_normalized[:, selected_indices, :]  # (seq_len, 4, 2)
+            else:
+                selected_indices = np.arange(pred_tracks_normalized.shape[1])
+                selected_tracks = pred_tracks_normalized[:, selected_indices, :]
+                while selected_tracks.shape[1] < 4:
+                    last_point = selected_tracks[:, -1:, :]
+                    selected_tracks = np.concatenate([selected_tracks, last_point], axis=1)
+                selected_tracks = selected_tracks[:, :4, :] 
+            
+            return selected_tracks
+            
+        elif self.num_targets == 2:
+            target1_path = os.path.join(tracks_dir, "pred_tracks_target_1.npy")
+            target2_path = os.path.join(tracks_dir, "pred_tracks_target_2.npy")
+            
+
+            all_selected_tracks = []
+            
+            for target_file in [target1_path, target2_path]:
+                pred_tracks = np.load(target_file)  # shape: (1, seq_len, num_points, 2)
+                pred_tracks = pred_tracks[0]  # (seq_len, num_points, 2)
+                
+                pred_tracks_normalized = pred_tracks.copy()
+                pred_tracks_normalized[:, :, 0] /= 1280.0  
+                pred_tracks_normalized[:, :, 1] /= 720.0   
+                
+                if pred_tracks_normalized.shape[1] >= 2:
+                    selected_indices = np.random.choice(pred_tracks_normalized.shape[1], 2, replace=False)
+                    selected_tracks = pred_tracks_normalized[:, selected_indices, :]  # (seq_len, 2, 2)
+                else:
+                    selected_indices = np.arange(pred_tracks_normalized.shape[1])
+                    selected_tracks = pred_tracks_normalized[:, selected_indices, :]
+                    while selected_tracks.shape[1] < 2:
+                        last_point = selected_tracks[:, -1:, :]
+                        selected_tracks = np.concatenate([selected_tracks, last_point], axis=1)
+                    selected_tracks = selected_tracks[:, :2, :] 
+                
+                all_selected_tracks.append(selected_tracks)
+            
+            final_selected_tracks = np.concatenate(all_selected_tracks, axis=1)  # (seq_len, 4, 2)
+            
+            return final_selected_tracks
+        
+        else:
+            raise ValueError(f"num_targets must be 1 or 2, got {self.num_targets}")
+
     def __getitem__(self, index):
         data_path = self.data_paths[index]
         cam_id = self.cam_ids[index]
@@ -307,34 +377,17 @@ class RealWorldDataset(Dataset):
 
         track_path = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_left.npy")
         track_path_right = os.path.join(data_path, "cam_{}".format(cam_id), "gripper_tracks", "normalized_coords_right.npy")
-        pred_tracks_path = os.path.join(data_path, "cam_{}".format(cam_id), "tracks", "pred_tracks.npy")
 
-        cache_key = f"{track_path}_{pred_tracks_path}_{cam_id}"
+        cache_key = f"{track_path}_{cam_id}_{self.num_targets}"
 
         if cache_key in self.track_cache:
-            all_tracks = self.track_cache[cache_key]
-        elif os.path.exists(track_path) and os.path.exists(pred_tracks_path):
+            track_data = self.track_cache[cache_key]
+        elif os.path.exists(track_path):
             left_tracks = np.load(track_path)      # shape: (seq_len, 2)
             right_tracks = np.load(track_path_right)  # shape: (seq_len, 2)
             
-            pred_tracks = np.load(pred_tracks_path)  # shape: (1, 379, 118, 2)
-            pred_tracks = pred_tracks[0]  # (379, 118, 2)
-            
-            pred_tracks_normalized = pred_tracks.copy()
-            pred_tracks_normalized[:, :, 0] /= 1280.0  
-            pred_tracks_normalized[:, :, 1] /= 720.0   
-            
-            if pred_tracks_normalized.shape[1] >= 4:
-                selected_indices = np.random.choice(pred_tracks_normalized.shape[1], 4, replace=False)
-                selected_tracks = pred_tracks_normalized[:, selected_indices, :]  
-            else:
-                selected_indices = np.arange(pred_tracks_normalized.shape[1])
-                selected_tracks = pred_tracks_normalized[:, selected_indices, :]
-                while selected_tracks.shape[1] < 4:
-                    last_point = selected_tracks[:, -1:, :]
-                    selected_tracks = np.concatenate([selected_tracks, last_point], axis=1)
-                selected_tracks = selected_tracks[:, :4, :] 
-            
+            selected_tracks = self._load_target_tracks(data_path, cam_id)
+
             min_len = min(len(left_tracks), len(right_tracks), len(selected_tracks))
             left_tracks = left_tracks[:min_len]
             right_tracks = right_tracks[:min_len]  
@@ -347,17 +400,8 @@ class RealWorldDataset(Dataset):
                 'selected_tracks': selected_tracks
             }
             
-        # elif os.path.exists(track_path):
-        #     left_tracks = np.load(track_path)
-        #     right_tracks = np.load(track_path_right)
-        #     gripper_tracks = np.stack([left_tracks, right_tracks], axis=1)  # shape: (seq_len, 2, 2)
-        #     self.track_cache[cache_key] = {
-        #         'gripper_tracks': gripper_tracks,
-        #         'selected_tracks': None
-        #     }
         else:
-            raise FileNotFoundError(f"Track file not found: {track_path} or {pred_tracks_path}")
-            all_tracks = None
+            raise FileNotFoundError(f"Track file not found: {track_path}")
 
         if cache_key in self.track_cache:
             track_data = self.track_cache[cache_key]
@@ -459,7 +503,7 @@ class RealWorldDataset(Dataset):
             'relative_action': relative_actions, 
             'relative_action_normalized': relative_actions_normalized,
             'gripper_tracks': gripper_tracks_tensor,    #  shape: (seq_len, 2, 2)
-            'selected_tracks': selected_tracks_tensor   #  shape: (seq_len, 4, 2)
+            'selected_tracks': selected_tracks_tensor   #  shape: (seq_len, 2*num_targets, 2)
         }
         
         if self.with_cloud:  # warning: this may significantly slow down the training process.

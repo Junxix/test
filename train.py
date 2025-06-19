@@ -41,7 +41,8 @@ default_args = edict({
     "save_epochs": 50,
     "num_workers": 24,
     "seed": 233,
-    "vis_data": False
+    "vis_data": False,
+    "num_targets": 2 
 })
 
 
@@ -76,7 +77,8 @@ def train(args_override):
         aug = args.aug,
         aug_jitter = args.aug_jitter, 
         with_cloud = False,
-        vis = args.vis_data
+        vis = args.vis_data,
+        num_targets = args.num_targets 
     )
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -94,7 +96,7 @@ def train(args_override):
     )
 
     gripper_perceiver_config = {
-        'num_points': 2,      # 
+        'num_points': 2,      # gripper左右两个点
         'input_dim': 2,       # 2D
         'patch_size': 4,      
         'embed_dim': 256,
@@ -109,7 +111,7 @@ def train(args_override):
     }
     
     selected_perceiver_config = {
-        'num_points': 4,      
+        'num_points': 4,      # 始终是4个点：1个target时从target_1选4个点，2个target时各选2个点
         'input_dim': 2,       # 2D
         'patch_size': 4,      
         'embed_dim': 256,
@@ -123,7 +125,13 @@ def train(args_override):
         'output_dim': None    
     }
 
-    if RANK == 0: print("Loading policy ...")
+    if RANK == 0: 
+        print(f"Loading policy with {args.num_targets} targets...")
+        if args.num_targets == 1:
+            print("Selected perceiver will process 4 points from target_1")
+        else:
+            print("Selected perceiver will process 4 points (2 from target_1 + 2 from target_2)")
+
     policy = RISE(
         num_action = args.num_action,
         num_history = args.num_history,
@@ -270,5 +278,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', action = 'store', type = int, help = 'number of workers', required = False, default = 24)
     parser.add_argument('--seed', action = 'store', type = int, help = 'seed', required = False, default = 233)
     parser.add_argument('--vis_data', action = 'store_true', help = 'whether to visualize the input data and ground truth actions.')
+    parser.add_argument('--num_targets', action = 'store', type = int, help = 'number of targets to use (1 or 2)', required = False, default = 2)
 
     train(vars(parser.parse_args()))

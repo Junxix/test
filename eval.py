@@ -354,7 +354,7 @@ def evaluate(args_override):
     if args.use_perceiver:
         perceiver_config = {
             'num_points': 2,      
-            'input_dim': 2,       
+            'input_dim': 3,       
             'patch_size': 4,      
             'embed_dim': 256,
             'query_dim': 512,
@@ -415,14 +415,37 @@ def evaluate(args_override):
         
         for t in range(args.max_steps):
             robot_tcp = agent.robot.get_tcp_pose()
+            print(robot_tcp.shape)
             tcp_position = robot_tcp[:3]
             
-            normalized_coords = tcp_converter.tcp_to_normalized_coords(tcp_position)
+
+            tcp_position = tcp[:3]  
+            tcp_rotation = tcp[3:]  
             
-            current_track = np.array([
-                normalized_coords['left'],   # shape: (2,)
-                normalized_coords['right']   # shape: (2,)
-            ])  # shape: (2, 2)
+            left_gripper_pos = tcp_position.copy()
+            left_gripper_pos[1] -= 0.019 
+            
+            right_gripper_pos = tcp_position.copy()
+            right_gripper_pos[1] += 0.019  
+            
+            left_tcp_full = np.concatenate([left_gripper_pos, tcp_rotation])
+            right_tcp_full = np.concatenate([right_gripper_pos, tcp_rotation])
+            
+            left_tcp_camera = projector.project_tcp_to_camera_coord(left_tcp_full, cam = agent.camera_serial)
+            right_tcp_camera = projector.project_tcp_to_camera_coord(right_tcp_full, cam = agent.camera_serial)
+            
+            left_gripper_pos_camera = left_tcp_camera[:3]
+            right_gripper_pos_camera = right_tcp_camera[:3]
+            
+            left_gripper_pos_normalized = (left_gripper_pos_camera - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+            right_gripper_pos_normalized = (right_gripper_pos_camera - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+            
+            current_track = np.array([left_gripper_pos_normalized, right_gripper_pos_normalized])  # shape: (2, 3)
+
+            # current_track = np.array([
+            #     normalized_coords['left'],   # shape: (2,)
+            #     normalized_coords['right']   # shape: (2,)
+            # ])  # shape: (2, 2)
             
             gripper_tracks_history.append(current_track)
             

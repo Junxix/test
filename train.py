@@ -132,6 +132,10 @@ def train(args_override):
         else:
             print("Selected perceiver will process 4 points (2 from target_1 + 2 from target_2)")
 
+    # 新增：从命令行参数控制是否使用DINOv2语义位置嵌入
+    use_dinov2_semantic_pos = getattr(args, 'use_dinov2_semantic_pos', True)
+    dinov2_model_name = getattr(args, 'dinov2_model_name', 'dinov2_vitb14')
+
     policy = RISE(
         num_action = args.num_action,
         num_history = args.num_history,
@@ -145,11 +149,19 @@ def train(args_override):
         use_relative_action = False,
         dropout = args.dropout,
         gripper_perceiver_config = gripper_perceiver_config,  
-        selected_perceiver_config = selected_perceiver_config  
+        selected_perceiver_config = selected_perceiver_config,
+        use_dinov2_semantic_pos = use_dinov2_semantic_pos,  # 新增
+        dinov2_model_name = dinov2_model_name  # 新增
     ).to(device)
+    
     if RANK == 0:
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         print("Number of parameters: {:.2f}M".format(n_parameters / 1e6))
+        if use_dinov2_semantic_pos:
+            print(f"Using DINOv2 semantic position embedding with model: {dinov2_model_name}")
+        else:
+            print("Using traditional type embedding")
+            
     policy = nn.parallel.DistributedDataParallel(
         policy, 
         device_ids = [LOCAL_RANK], 
@@ -199,7 +211,8 @@ def train(args_override):
             gripper_tracks_data = data.get('gripper_tracks', None) 
             selected_tracks_data = data.get('selected_tracks', None)
             gripper_track_lengths_data = data.get('gripper_track_lengths', None) 
-            selected_track_lengths_data = data.get('selected_track_lengths', None) 
+            selected_track_lengths_data = data.get('selected_track_lengths', None)
+            rgb_images_data = data.get('rgb_image', None)  # 新增：获取RGB图像
 
             cloud_feats, cloud_coords, action_data = cloud_feats.to(device), cloud_coords.to(device), action_data.to(device)
             if relative_action_data is not None:
@@ -212,6 +225,8 @@ def train(args_override):
                 gripper_track_lengths_data = gripper_track_lengths_data.to(device)
             if selected_track_lengths_data is not None:
                 selected_track_lengths_data = selected_track_lengths_data.to(device)
+            if rgb_images_data is not None:  # 新增：处理RGB图像
+                rgb_images_data = rgb_images_data.to(device)
             
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
             # forward
@@ -219,10 +234,11 @@ def train(args_override):
                 cloud=cloud_data, 
                 actions=action_data, 
                 relative_actions=relative_action_data, 
-                gripper_tracks=gripper_tracks_data,      #  (batch, seq_len, 2, 2)
-                selected_tracks=selected_tracks_data,    #  (batch, seq_len, 4, 2)
+                gripper_tracks=gripper_tracks_data,      
+                selected_tracks=selected_tracks_data,    
                 gripper_track_lengths=gripper_track_lengths_data,
                 selected_track_lengths=selected_track_lengths_data,
+                rgb_images=rgb_images_data,  # 新增：传递RGB图像
                 batch_size=action_data.shape[0]
             )
             
@@ -279,5 +295,11 @@ if __name__ == '__main__':
     parser.add_argument('--seed', action = 'store', type = int, help = 'seed', required = False, default = 233)
     parser.add_argument('--vis_data', action = 'store_true', help = 'whether to visualize the input data and ground truth actions.')
     parser.add_argument('--num_targets', action = 'store', type = int, help = 'number of targets to use (1 or 2)', required = False, default = 2)
+    
+    # 新增参数
+    parser.add_argument('--use_dinov2_semantic_pos', action = 'store_true', help = 'whether to use DINOv2 semantic position embedding')
+    parser.add_argument('--dinov2_model_name', action = 'store', type = str, help = 'DINOv2 model name', 
+                        choices=['dinov2_vits14', 'dinov2_vitb14', 'dinov2_vitl14', 'dinov2_vitg14'], 
+                        default = 'dinov2_vitb14')
 
     train(vars(parser.parse_args()))

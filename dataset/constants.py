@@ -11,7 +11,8 @@ TO_TENSOR_KEYS = [
     'relative_action',  
     'relative_action_normalized',
     'gripper_tracks',
-    'selected_tracks'
+    'selected_tracks',
+    'rgb_image'
 ]
 
 REL_TRANS_MAX = 0.1  

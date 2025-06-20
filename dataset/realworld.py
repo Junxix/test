@@ -360,6 +360,10 @@ class RealWorldDataset(Dataset):
         colors_list = np.stack(colors_list, axis = 0)
         depths_list = np.stack(depths_list, axis = 0)
 
+        current_rgb_image = colors_list[-1]  # 最后一帧
+    # 转换为torch tensor格式 (H, W, C) -> (C, H, W)
+        current_rgb_tensor = torch.from_numpy(current_rgb_image).permute(2, 0, 1).float() / 255.0
+
         # point clouds
         clouds = []
         for i, frame_id in enumerate(obs_frame_ids):
@@ -503,7 +507,8 @@ class RealWorldDataset(Dataset):
             'relative_action': relative_actions, 
             'relative_action_normalized': relative_actions_normalized,
             'gripper_tracks': gripper_tracks_tensor,    #  shape: (seq_len, 2, 2)
-            'selected_tracks': selected_tracks_tensor   #  shape: (seq_len, 2*num_targets, 2)
+            'selected_tracks': selected_tracks_tensor,   #  shape: (seq_len, 2*num_targets, 2)
+            'rgb_image': current_rgb_tensor
         }
         
         if self.with_cloud:  # warning: this may significantly slow down the training process.
@@ -551,6 +556,10 @@ def collate_fn(batch):
                         ret_dict['selected_track_lengths'] = None
                 else:
                     ret_dict[key] = collate_fn([d[key] for d in batch])
+            elif key == 'rgb_image':
+                # 处理RGB图像
+                rgb_images = [d[key] for d in batch]
+                ret_dict[key] = torch.stack(rgb_images, 0)
             else:
                 ret_dict[key] = [d[key] for d in batch]
         coords_batch = ret_dict['input_coords_list']

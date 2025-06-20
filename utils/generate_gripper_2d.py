@@ -2,8 +2,8 @@ import numpy as np
 import cv2
 import os
 
-root_train_dir = '/data/jingjing/data/realdata_sampled/realdata_20250618/train/'
-calib_root_dir = '/data/jingjing/data/realdata_sampled/realdata_20250618/calib/1749642854745'
+root_train_dir = '/data/jingjing/data/realdata_sampled/realdata_sampled_20250620/train/'
+calib_root_dir = '/data/jingjing/data/realdata_sampled/realdata_sampled_20250620/calib/1750409127700'
 
 def get_gripper_offset(gripper_info_dir, timestamp):
     """

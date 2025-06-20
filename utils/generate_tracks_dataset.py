@@ -434,7 +434,7 @@ def main():
     sam2_checkpoint = "/data/jingjing/pretrained-models/sam2/checkpoints/sam2.1_hiera_large.pt"
     sam2_config = "//data/jingjing/pretrained-models/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
     
-    base_path = "/data/jingjing/data/realdata_sampled/realdata_20250618/train/task_0010_user_0555_scene_0050_cfg_0001/cam_750612070851"
+    base_path = "/data/jingjing/data/realdata_sampled/realdata_sampled_20250620/train/task_0011_user_0555_scene_0005_cfg_0001/cam_750612070851"
     video_path = os.path.join(base_path, "color")
     
     # 创建集成对象
@@ -496,7 +496,8 @@ def main():
             print(f"  - {visibility_filename}")
 
             # 可视化当前目标的追踪结果
-            vis_output_dir = f"./tracking_results_target_{target_id}"
+            # vis_output_dir = f"./tracking_results_target_{target_id}"
+            vis_output_dir = os.path.join(base_path, f"tracking_results_target_{target_id}")
             integrator.visualize_tracking_results(
                 pred_tracks, 
                 pred_visibility,

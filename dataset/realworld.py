@@ -495,6 +495,18 @@ class RealWorldDataset(Dataset):
         gripper_tracks_tensor = torch.from_numpy(gripper_track_slice).float() if gripper_track_slice is not None else None
         selected_tracks_tensor = torch.from_numpy(selected_track_slice).float() if selected_track_slice is not None else None
 
+        rgb_image = colors_list[-1]  # 使用最后一帧作为当前帧
+        rgb_tensor = torch.from_numpy(rgb_image).permute(2, 0, 1).float() / 255.0
+        
+        # 从track数据中提取坐标
+        if gripper_track_slice is not None and selected_track_slice is not None:
+            # 使用当前帧的track坐标
+            current_frame_idx = min(track_idx, len(gripper_track_slice) - 1)
+            current_gripper_coords = gripper_track_slice[current_frame_idx]  # shape: (2, 2)
+            current_selected_coords = selected_track_slice[current_frame_idx]  # shape: (4, 2)
+        else:
+            raise ValueError("Gripper tracks or selected tracks are not available.")
+        
         ret_dict = {
             'input_coords_list': input_coords_list,
             'input_feats_list': input_feats_list,
@@ -502,8 +514,11 @@ class RealWorldDataset(Dataset):
             'action_normalized': actions_normalized,
             'relative_action': relative_actions, 
             'relative_action_normalized': relative_actions_normalized,
-            'gripper_tracks': gripper_tracks_tensor,    #  shape: (seq_len, 2, 2)
-            'selected_tracks': selected_tracks_tensor   #  shape: (seq_len, 2*num_targets, 2)
+            'gripper_tracks': gripper_tracks_tensor,
+            'selected_tracks': selected_tracks_tensor,
+            'rgb_images': rgb_tensor,                                    # 新增
+            'gripper_coords': torch.from_numpy(current_gripper_coords).float(),  # 新增
+            'selected_coords': torch.from_numpy(current_selected_coords).float() # 新增
         }
         
         if self.with_cloud:  # warning: this may significantly slow down the training process.
@@ -549,6 +564,8 @@ def collate_fn(batch):
                     else:
                         ret_dict[key] = None
                         ret_dict['selected_track_lengths'] = None
+                elif key in ['rgb_images', 'gripper_coords', 'selected_coords']:  # 新增字段处理
+                    ret_dict[key] = torch.stack([d[key] for d in batch], 0)
                 else:
                     ret_dict[key] = collate_fn([d[key] for d in batch])
             else:

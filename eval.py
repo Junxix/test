@@ -657,7 +657,8 @@ def evaluate(args_override):
         dropout = args.dropout,
         use_relative_action = args.use_relative_action,
         gripper_perceiver_config = gripper_perceiver_config, 
-        selected_perceiver_config = selected_perceiver_config  
+        selected_perceiver_config = selected_perceiver_config,
+        use_dino_encoding = True  # 启用DINO编码
     ).to(device)
     n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print("Number of parameters: {:.2f}M".format(n_parameters / 1e6))
@@ -701,7 +702,8 @@ def evaluate(args_override):
             tcp_position = robot_tcp[:3]
             
             colors, depths = agent.get_observation()
-            
+            rgb_images = torch.from_numpy(colors).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0
+
             if not first_frame_initialized:
                 success = tcp_converter.initialize_tracking(colors)
                 if not success:
@@ -713,6 +715,18 @@ def evaluate(args_override):
                 gripper_width,
                 current_frame=colors
             )
+
+            gripper_coords = torch.tensor([[
+                normalized_coords['left'],
+                normalized_coords['right']
+            ]]).float().to(device)
+            
+            selected_coords = torch.tensor([[
+                normalized_coords['tracked_0'],
+                normalized_coords['tracked_1'], 
+                normalized_coords['tracked_2'],
+                normalized_coords['tracked_3']
+            ]]).float().to(device)
 
             track_manager.add_current_step(tcp_position, normalized_coords)
             
@@ -780,7 +794,10 @@ def evaluate(args_override):
                     selected_tracks=selected_tracks,
                     gripper_track_lengths=gripper_track_lengths,
                     selected_track_lengths=selected_track_lengths,
-                    batch_size=1
+                    batch_size=1,
+                    rgb_images=rgb_images,          # 新增
+                    gripper_coords=gripper_coords,  # 新增  
+                    selected_coords=selected_coords # 新增
                 ).squeeze(0).cpu().numpy()
                 
                 action = unnormalize_action(pred_raw_action)

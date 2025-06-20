@@ -76,7 +76,7 @@ def train(args_override):
         voxel_size = args.voxel_size,
         aug = args.aug,
         aug_jitter = args.aug_jitter, 
-        with_cloud = False,
+        with_cloud = True,  # 改为True以获取原始图像数据
         vis = args.vis_data,
         num_targets = args.num_targets 
     )
@@ -145,7 +145,8 @@ def train(args_override):
         use_relative_action = False,
         dropout = args.dropout,
         gripper_perceiver_config = gripper_perceiver_config,  
-        selected_perceiver_config = selected_perceiver_config  
+        selected_perceiver_config = selected_perceiver_config,
+        use_dino_encoding = True  # 启用DINO编码
     ).to(device)
     if RANK == 0:
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -200,6 +201,10 @@ def train(args_override):
             selected_tracks_data = data.get('selected_tracks', None)
             gripper_track_lengths_data = data.get('gripper_track_lengths', None) 
             selected_track_lengths_data = data.get('selected_track_lengths', None) 
+            rgb_images_data = data.get('rgb_images', None)  # 需要在dataset中添加
+            gripper_coords_data = data.get('gripper_coords', None)  # 需要在dataset中添加
+            selected_coords_data = data.get('selected_coords', None)  # 需要在dataset中添加
+
 
             cloud_feats, cloud_coords, action_data = cloud_feats.to(device), cloud_coords.to(device), action_data.to(device)
             if relative_action_data is not None:
@@ -213,6 +218,13 @@ def train(args_override):
             if selected_track_lengths_data is not None:
                 selected_track_lengths_data = selected_track_lengths_data.to(device)
             
+            if rgb_images_data is not None:
+                rgb_images_data = rgb_images_data.to(device)
+            if gripper_coords_data is not None:
+                gripper_coords_data = gripper_coords_data.to(device)
+            if selected_coords_data is not None:
+                selected_coords_data = selected_coords_data.to(device)
+
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
             # forward
             loss = policy(
@@ -223,7 +235,10 @@ def train(args_override):
                 selected_tracks=selected_tracks_data,    #  (batch, seq_len, 4, 2)
                 gripper_track_lengths=gripper_track_lengths_data,
                 selected_track_lengths=selected_track_lengths_data,
-                batch_size=action_data.shape[0]
+                batch_size=action_data.shape[0],
+                rgb_images=rgb_images_data,        # 新增
+                gripper_coords=gripper_coords_data, # 新增
+                selected_coords=selected_coords_data # 新增
             )
             
             # backward

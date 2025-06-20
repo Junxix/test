@@ -84,13 +84,26 @@ class RISE(nn.Module):
         pos = pos + point_cloud_type_embed
 
         if self.use_dual_perceiver and gripper_tracks is not None and selected_tracks is not None:
+            # gripper_tokens: (batch_size, num_points, num_queries, query_dim)
             gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
             selected_tokens = self.selected_perceiver(selected_tracks, lengths=selected_track_lengths)
             
-            # gripper_tokens: (batch_size, num_queries, query_dim)
-            # selected_tokens: (batch_size, num_queries, query_dim)
+            # print(f"Debug - gripper_tokens shape: {gripper_tokens.shape}")
+            # print(f"Debug - selected_tokens shape: {selected_tokens.shape}")
+            
+            if len(gripper_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
+                batch_size_g, num_points_g, num_queries_g, dim_g = gripper_tokens.shape
+                gripper_tokens = gripper_tokens.view(batch_size_g, num_points_g * num_queries_g, dim_g)
+            
+            if len(selected_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
+                batch_size_s, num_points_s, num_queries_s, dim_s = selected_tokens.shape
+                selected_tokens = selected_tokens.view(batch_size_s, num_points_s * num_queries_s, dim_s)
+            
+            # (batch_size, total_tokens, dim)
             gripper_tokens = self.perceiver_fusion_layer(gripper_tokens)
             selected_tokens = self.perceiver_fusion_layer(selected_tokens)
+            # print(f"Debug - gripper_tokens after fusion: {gripper_tokens.shape}")
+            # print(f"Debug - selected_tokens after fusion: {selected_tokens.shape}")
             
             gripper_type_embed = self.type_embedding(torch.ones(batch_size, gripper_tokens.size(1), dtype=torch.long, device=src.device))
             gripper_pos = torch.zeros_like(gripper_tokens) + gripper_type_embed
@@ -98,8 +111,10 @@ class RISE(nn.Module):
             selected_type_embed = self.type_embedding(torch.full((batch_size, selected_tokens.size(1)), 2, dtype=torch.long, device=src.device))
             selected_pos = torch.zeros_like(selected_tokens) + selected_type_embed
             
-            perceiver_tokens = torch.cat([gripper_tokens, selected_tokens], dim=1)  # (batch_size, 8, hidden_dim)
+            perceiver_tokens = torch.cat([gripper_tokens, selected_tokens], dim=1)
             perceiver_pos = torch.cat([gripper_pos, selected_pos], dim=1)
+            # print(f"Debug - perceiver_tokens shape: {perceiver_tokens.shape}")
+            # print(f"Debug - perceiver_pos shape: {perceiver_pos.shape}")
             
             src = torch.cat([src, perceiver_tokens], dim=1)
             pos = torch.cat([pos, perceiver_pos], dim=1)
@@ -112,6 +127,11 @@ class RISE(nn.Module):
 
         elif self.use_dual_perceiver and gripper_tracks is not None:
             gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
+            
+            if len(gripper_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
+                batch_size_g, num_points_g, num_queries_g, dim_g = gripper_tokens.shape
+                gripper_tokens = gripper_tokens.view(batch_size_g, num_points_g * num_queries_g, dim_g)
+            
             gripper_tokens = self.perceiver_fusion_layer(gripper_tokens)
 
             gripper_type_embed = self.type_embedding(torch.ones(batch_size, gripper_tokens.size(1), dtype=torch.long, device=src.device))

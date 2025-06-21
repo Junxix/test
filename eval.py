@@ -58,7 +58,9 @@ default_args = edict({
     "ensemble_mode": "act",
     "use_relative_action": False,  
     "use_dual_perceiver": True,
-    "cotracker_checkpoint": "/home/ubuntu/git/jingjing/testspace/RISE_add_cotracker/scaled_online.pth"  
+    "cotracker_checkpoint": "/home/ubuntu/git/jingjing/testspace/RISE_add_cotracker/scaled_online.pth",
+    "use_dinov2_semantic_pos": True,  # 添加DINOv2支持
+    "dinov2_model_name": "dinov2_vitb14"  # 添加DINOv2模型名称
 })
 
 
@@ -657,10 +659,17 @@ def evaluate(args_override):
         dropout = args.dropout,
         use_relative_action = args.use_relative_action,
         gripper_perceiver_config = gripper_perceiver_config, 
-        selected_perceiver_config = selected_perceiver_config  
+        selected_perceiver_config = selected_perceiver_config,
+        use_dinov2_semantic_pos = args.use_dinov2_semantic_pos,  
+        dinov2_model_name = args.dinov2_model_name 
     ).to(device)
     n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print("Number of parameters: {:.2f}M".format(n_parameters / 1e6))
+    
+    if args.use_dinov2_semantic_pos:
+        print(f"Using DINOv2 semantic position embedding with model: {args.dinov2_model_name}")
+    else:
+        print("Using traditional type embedding")
 
     # load checkpoint
     assert args.ckpt is not None, "Please provide the checkpoint to evaluate."
@@ -733,6 +742,11 @@ def evaluate(args_override):
                 feats, coords = feats.to(device), coords.to(device)
                 cloud_data = ME.SparseTensor(feats, coords)
                 
+                rgb_images = None
+                if args.use_dinov2_semantic_pos:
+                    rgb_tensor = torch.from_numpy(colors).permute(2, 0, 1).unsqueeze(0).to(device).float() / 255.0
+                    rgb_images = rgb_tensor
+                
                 relative_actions = None
                 point_tracks = None
                 track_lengths = None
@@ -780,6 +794,7 @@ def evaluate(args_override):
                     selected_tracks=selected_tracks,
                     gripper_track_lengths=gripper_track_lengths,
                     selected_track_lengths=selected_track_lengths,
+                    rgb_images=rgb_images,
                     batch_size=1
                 ).squeeze(0).cpu().numpy()
                 
@@ -878,5 +893,10 @@ if __name__ == '__main__':
     parser.add_argument('--use_relative_action', action = 'store_true', help = 'whether to use relative action (should match training config)')
     parser.add_argument('--use_dual_perceiver', action = 'store_true', help = 'whether to use dual perceiver (should match training config)')
     parser.add_argument('--cotracker_checkpoint', action = 'store', type = str, help = 'path to CoTracker checkpoint', required = False, default = "/home/ubuntu/git/jingjing/testspace/RISE_add_cotracker/scaled_online.pth")
+    
+    parser.add_argument('--use_dinov2_semantic_pos', action = 'store_true', help = 'whether to use DINOv2 semantic position embedding')
+    parser.add_argument('--dinov2_model_name', action = 'store', type = str, help = 'DINOv2 model name', 
+                        choices=['dinov2_vits14', 'dinov2_vitb14', 'dinov2_vitl14', 'dinov2_vitg14'], 
+                        default = 'dinov2_vitb14')
 
     evaluate(vars(parser.parse_args()))

@@ -113,10 +113,6 @@ class PointPerceiver(nn.Module):
         
         return encoded  # (batch_size, num_points, num_queries, dim)
         
-        # 如果你需要flatten为token序列，可以这样做：
-        # encoded = encoded.view(batch_size, num_points * num_queries, dim)
-        # return encoded  # (batch_size, num_points * num_queries, dim)
-
 class PointPerceiver(nn.Module):
     def __init__(self, output_dim=None, **kwargs):
         super().__init__()

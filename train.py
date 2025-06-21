@@ -96,8 +96,8 @@ def train(args_override):
     )
 
     gripper_perceiver_config = {
-        'num_points': 2,      # gripper左右两个点
-        'input_dim': 2,       # 2D
+        'num_points': 2,    
+        'input_dim': 2,      
         'patch_size': 4,      
         'embed_dim': 256,
         'query_dim': 512,
@@ -111,8 +111,8 @@ def train(args_override):
     }
     
     selected_perceiver_config = {
-        'num_points': 4,      # 始终是4个点：1个target时从target_1选4个点，2个target时各选2个点
-        'input_dim': 2,       # 2D
+        'num_points': 4,     
+        'input_dim': 2,      
         'patch_size': 4,      
         'embed_dim': 256,
         'query_dim': 512,
@@ -132,7 +132,6 @@ def train(args_override):
         else:
             print("Selected perceiver will process 4 points (2 from target_1 + 2 from target_2)")
 
-    # 新增：从命令行参数控制是否使用DINOv2语义位置嵌入
     use_dinov2_semantic_pos = getattr(args, 'use_dinov2_semantic_pos', True)
     dinov2_model_name = getattr(args, 'dinov2_model_name', 'dinov2_vitb14')
 
@@ -150,8 +149,8 @@ def train(args_override):
         dropout = args.dropout,
         gripper_perceiver_config = gripper_perceiver_config,  
         selected_perceiver_config = selected_perceiver_config,
-        use_dinov2_semantic_pos = use_dinov2_semantic_pos,  # 新增
-        dinov2_model_name = dinov2_model_name  # 新增
+        use_dinov2_semantic_pos = use_dinov2_semantic_pos, 
+        dinov2_model_name = dinov2_model_name 
     ).to(device)
     
     if RANK == 0:
@@ -212,7 +211,7 @@ def train(args_override):
             selected_tracks_data = data.get('selected_tracks', None)
             gripper_track_lengths_data = data.get('gripper_track_lengths', None) 
             selected_track_lengths_data = data.get('selected_track_lengths', None)
-            rgb_images_data = data.get('rgb_image', None)  # 新增：获取RGB图像
+            rgb_images_data = data.get('rgb_image', None) 
 
             cloud_feats, cloud_coords, action_data = cloud_feats.to(device), cloud_coords.to(device), action_data.to(device)
             if relative_action_data is not None:
@@ -225,7 +224,7 @@ def train(args_override):
                 gripper_track_lengths_data = gripper_track_lengths_data.to(device)
             if selected_track_lengths_data is not None:
                 selected_track_lengths_data = selected_track_lengths_data.to(device)
-            if rgb_images_data is not None:  # 新增：处理RGB图像
+            if rgb_images_data is not None:  
                 rgb_images_data = rgb_images_data.to(device)
             
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
@@ -238,7 +237,7 @@ def train(args_override):
                 selected_tracks=selected_tracks_data,    
                 gripper_track_lengths=gripper_track_lengths_data,
                 selected_track_lengths=selected_track_lengths_data,
-                rgb_images=rgb_images_data,  # 新增：传递RGB图像
+                rgb_images=rgb_images_data, 
                 batch_size=action_data.shape[0]
             )
             
@@ -296,7 +295,6 @@ if __name__ == '__main__':
     parser.add_argument('--vis_data', action = 'store_true', help = 'whether to visualize the input data and ground truth actions.')
     parser.add_argument('--num_targets', action = 'store', type = int, help = 'number of targets to use (1 or 2)', required = False, default = 2)
     
-    # 新增参数
     parser.add_argument('--use_dinov2_semantic_pos', action = 'store_true', help = 'whether to use DINOv2 semantic position embedding')
     parser.add_argument('--dinov2_model_name', action = 'store', type = str, help = 'DINOv2 model name', 
                         choices=['dinov2_vits14', 'dinov2_vitb14', 'dinov2_vitl14', 'dinov2_vitg14'], 

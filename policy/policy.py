@@ -9,63 +9,50 @@ from policy.tokenizer import Enhanced3DEncoder, Sparse3DEncoder
 from track.model import PointPerceiver 
 
 class DINOv2SemanticExtractor(nn.Module):
-    """
-    使用DINOv2提取语义特征的模块
-    """
     def __init__(self, hidden_dim=512, dinov2_model_name='dinov2_vitb14'):
         super().__init__()
         self.hidden_dim = hidden_dim
         
-        # 加载DINOv2模型
-        self.dinov2 = torch.hub.load('facebookresearch/dinov2', dinov2_model_name, force_reload=False) 
+        self.dinov2 = torch.hub.load('/home/jingjing/.cache/torch/hub/facebookresearch_dinov2_main',  dinov2_model_name, source='local',  force_reload=False)
         self.dinov2.eval()
         
-        # 冻结DINOv2参数
         for param in self.dinov2.parameters():
             param.requires_grad = False
             
-        # DINOv2输出特征维度 (vitb14: 768, vits14: 384, vitl14: 1024, vitg14: 1536)
+        # (vitb14: 768, vits14: 384, vitl14: 1024, vitg14: 1536)
         dinov2_dim = self.dinov2.embed_dim
         
-        # 将DINOv2特征映射到hidden_dim
         self.feature_projection = nn.Linear(dinov2_dim, hidden_dim)
         
-        # 图像预处理
         self.preprocess = transforms.Compose([
-            transforms.Resize((224, 224)),  # DINOv2标准输入尺寸
+            transforms.Resize((224, 224)), 
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
     def extract_semantic_features(self, rgb_images):
         """
-        从RGB图像中提取语义特征
         Args:
-            rgb_images: (batch_size, 3, H, W) 的RGB图像张量
+            rgb_images: (batch_size, 3, H, W)
         Returns:
-            features: (batch_size, hidden_dim, h, w) 语义特征图
+            features: (batch_size, hidden_dim, h, w)
         """
         batch_size = rgb_images.size(0)
         
-        # 预处理图像
         processed_images = torch.stack([self.preprocess(img) for img in rgb_images])
         
         with torch.no_grad():
-            # 获取DINOv2的patch features
             features = self.dinov2.forward_features(processed_images)
             patch_features = features['x_norm_patchtokens']  # (batch_size, num_patches, dinov2_dim)
             
-        # 计算patch grid尺寸 (DINOv2 ViT-B/14: 224/14 = 16)
+        # (DINOv2 ViT-B/14: 224/14 = 16)
         patch_size = 14
         grid_size = 224 // patch_size  # 16
         
-        # 重塑为空间特征图
         patch_features = patch_features.view(batch_size, grid_size, grid_size, -1)
         patch_features = patch_features.permute(0, 3, 1, 2)  # (batch_size, dinov2_dim, 16, 16)
         
-        # 上采样到更高分辨率以便更精确的特征采样
         patch_features = F.interpolate(patch_features, size=(56, 56), mode='bilinear', align_corners=False)
         
-        # 投影到目标维度
         batch_size, dinov2_dim, h, w = patch_features.shape
         patch_features = patch_features.permute(0, 2, 3, 1).contiguous()  # (batch_size, h, w, dinov2_dim)
         patch_features = patch_features.view(-1, dinov2_dim)  # (batch_size * h * w, dinov2_dim)
@@ -78,11 +65,10 @@ class DINOv2SemanticExtractor(nn.Module):
     
     def sample_features_at_positions(self, semantic_features, normalized_positions, img_height=720, img_width=1280):
         """
-        在指定位置采样语义特征
         Args:
-            semantic_features: (batch_size, hidden_dim, h, w) 语义特征图
-            normalized_positions: (batch_size, seq_len, num_points, 2) 归一化坐标 [0,1]
-            img_height, img_width: 原始图像尺寸
+            semantic_features: (batch_size, hidden_dim, h, w) 
+            normalized_positions: (batch_size, seq_len, num_points, 2) [0,1]
+            img_height, img_width: 
         Returns:
             sampled_features: (batch_size, seq_len, num_points, hidden_dim)
         """
@@ -91,7 +77,6 @@ class DINOv2SemanticExtractor(nn.Module):
         
         assert batch_size == batch_size_pos, "Batch size mismatch"
         
-        # 将归一化坐标转换为特征图坐标
         # normalized_positions: [0,1] -> feature map coordinates
         x_coords = normalized_positions[..., 0] * (feat_w - 1)  # (batch_size, seq_len, num_points)
         y_coords = normalized_positions[..., 1] * (feat_h - 1)  # (batch_size, seq_len, num_points)
@@ -108,7 +93,6 @@ class DINOv2SemanticExtractor(nn.Module):
         total_samples = seq_len * num_points
         grid_reshaped = grid.view(batch_size, 1, total_samples, 2)  # (batch_size, 1, total_samples, 2)
         
-        # 采样特征
         sampled_features = F.grid_sample(
             semantic_features, 
             grid_reshaped, 
@@ -117,7 +101,6 @@ class DINOv2SemanticExtractor(nn.Module):
             align_corners=True
         )  # (batch_size, hidden_dim, 1, total_samples)
         
-        # 重塑回原始形状
         sampled_features = sampled_features.squeeze(2)  # (batch_size, hidden_dim, total_samples)
         sampled_features = sampled_features.permute(0, 2, 1)  # (batch_size, total_samples, hidden_dim)
         sampled_features = sampled_features.view(batch_size, seq_len, num_points, hidden_dim)
@@ -163,13 +146,11 @@ class RISE(nn.Module):
         self.use_dual_perceiver = gripper_perceiver_config is not None and selected_perceiver_config is not None
         
         if self.use_dinov2_semantic_pos:
-            # 使用DINOv2语义位置嵌入替代type embedding
             self.semantic_extractor = DINOv2SemanticExtractor(hidden_dim, dinov2_model_name)
-            print("使用DINOv2语义位置嵌入")
+            print("use DINOv2 semantic position encoding")
         else:
-            # 保留原始的type embedding作为备选
             self.type_embedding = nn.Embedding(3, hidden_dim)
-            print("使用传统type embedding")
+            print("use type embedding for position encoding")
         
         if self.use_dual_perceiver:
             self.gripper_perceiver = PointPerceiver(**gripper_perceiver_config)
@@ -207,11 +188,8 @@ class RISE(nn.Module):
             src, pos, src_padding_mask = self.sparse_encoder(cloud, batch_size=batch_size)
 
         if self.use_dinov2_semantic_pos:
-            # 对于点云，我们仍然使用原来的位置编码（不添加语义信息）
-            # 只为gripper和selected tracks添加语义位置嵌入
-            pass  # pos保持不变
+            pass  
         else:
-            # 使用传统的type embedding
             point_cloud_type_embed = self.type_embedding(torch.zeros(batch_size, src.size(1), dtype=torch.long, device=src.device))
             pos = pos + point_cloud_type_embed
 
@@ -219,29 +197,27 @@ class RISE(nn.Module):
             # gripper_tokens: (batch_size, num_points, num_queries, query_dim)
             gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
             selected_tokens = self.selected_perceiver(selected_tracks, lengths=selected_track_lengths)
-            print(f"Gripper tokens shape: {gripper_tokens.shape}, Selected tokens shape: {selected_tokens.shape}")
-            if len(gripper_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
-                batch_size_g, num_points_g, num_queries_g, dim_g = gripper_tokens.shape
-                gripper_tokens = gripper_tokens.view(batch_size_g, num_points_g * num_queries_g, dim_g)
+            # print(f"Gripper tokens shape: {gripper_tokens.shape}, Selected tokens shape: {selected_tokens.shape}")
+            if len(gripper_tokens.shape) == 4:  # (batch_size, num_points, num_queries_per_point, dim)
+                batch_size_g, num_points_g, queries_per_point_g, dim_g = gripper_tokens.shape
+                gripper_tokens = gripper_tokens.view(batch_size_g, num_points_g * queries_per_point_g, dim_g)
             
-            if len(selected_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
-                batch_size_s, num_points_s, num_queries_s, dim_s = selected_tokens.shape
-                selected_tokens = selected_tokens.view(batch_size_s, num_points_s * num_queries_s, dim_s)
+            if len(selected_tokens.shape) == 4:  # (batch_size, num_points, num_queries_per_point, dim)
+                batch_size_s, num_points_s, queries_per_point_s, dim_s = selected_tokens.shape
+                selected_tokens = selected_tokens.view(batch_size_s, num_points_s * queries_per_point_s, dim_s)
             
+            # print(f"Gripper tokens reshaped to: {gripper_tokens.shape}, Selected tokens reshaped to: {selected_tokens.shape}")
             # (batch_size, total_tokens, dim)
             gripper_tokens = self.perceiver_fusion_layer(gripper_tokens)
             selected_tokens = self.perceiver_fusion_layer(selected_tokens)
             
             if self.use_dinov2_semantic_pos and rgb_images is not None:
-                # 使用DINOv2生成语义位置嵌入
                 semantic_features = self.semantic_extractor.extract_semantic_features(rgb_images)
                 
-                # 只使用当前帧（最后一帧）的坐标来获取语义特征
-                # gripper_tracks: (batch_size, seq_len, 2, 2) - 只取最后一帧
+
                 current_gripper_coords = gripper_tracks[:, -1:, :, :]  # (batch_size, 1, 2, 2)
                 current_selected_coords = selected_tracks[:, -1:, :, :]  # (batch_size, 1, 4, 2)
                 
-                # 采样当前帧坐标对应的语义特征
                 gripper_semantic_features = self.semantic_extractor.sample_features_at_positions(
                     semantic_features, current_gripper_coords
                 )  # (batch_size, 1, 2, hidden_dim)
@@ -250,38 +226,27 @@ class RISE(nn.Module):
                     semantic_features, current_selected_coords
                 )  # (batch_size, 1, 4, hidden_dim)
 
-                print(f"Gripper semantic features shape: {gripper_semantic_features.shape}, Selected semantic features shape: {selected_semantic_features.shape}")
+                # print(f"Gripper semantic features shape: {gripper_semantic_features.shape}, Selected semantic features shape: {selected_semantic_features.shape}")
                 
-                # 移除时间维度，只保留当前帧的语义特征
                 gripper_semantic_features = gripper_semantic_features.squeeze(1)  # (batch_size, 2, hidden_dim)
                 selected_semantic_features = selected_semantic_features.squeeze(1)  # (batch_size, 4, hidden_dim)
-                print(f"Gripper semantic features after squeeze: {gripper_semantic_features.shape}, Selected semantic features after squeeze: {selected_semantic_features.shape}")
-                # 根据perceiver的查询数量来扩展语义特征
-                gripper_queries_per_point = num_queries_g // num_points_g
-                selected_queries_per_point = num_queries_s // num_points_s
-
-                print(f"Gripper queries per point: {gripper_queries_per_point}, Selected queries per point: {selected_queries_per_point}")
+                # print(f"Gripper semantic features after squeeze: {gripper_semantic_features.shape}, Selected semantic features after squeeze: {selected_semantic_features.shape}")
                 
-                # 为每个点的所有查询重复相同的语义特征
                 gripper_semantic_pos_expanded = gripper_semantic_features.unsqueeze(2).repeat(
-                    1, 1, gripper_queries_per_point, 1
+                    1, 1, queries_per_point_g, 1
                 )  # (batch_size, 2, queries_per_point, hidden_dim)
-                gripper_semantic_pos_expanded = gripper_semantic_pos_expanded.view(
-                    batch_size, num_points_g * gripper_queries_per_point, self.transformer.d_model
+                gripper_pos = gripper_semantic_pos_expanded.view(
+                    batch_size, num_points_g * queries_per_point_g, self.transformer.d_model
                 )  # (batch_size, total_gripper_queries, hidden_dim)
                 
                 selected_semantic_pos_expanded = selected_semantic_features.unsqueeze(2).repeat(
-                    1, 1, selected_queries_per_point, 1
+                    1, 1, queries_per_point_s, 1
                 )  # (batch_size, 4, queries_per_point, hidden_dim)
-                selected_semantic_pos_expanded = selected_semantic_pos_expanded.view(
-                    batch_size, num_points_s * selected_queries_per_point, self.transformer.d_model
+                selected_pos = selected_semantic_pos_expanded.view(
+                    batch_size, num_points_s * queries_per_point_s, self.transformer.d_model
                 )  # (batch_size, total_selected_queries, hidden_dim)
                 
-                # 确保维度匹配
-                print(f"Gripper tokens shape: {gripper_tokens.shape}, Selected tokens shape: {selected_tokens.shape}")
-                print(f"Gripper semantic pos shape: {gripper_semantic_pos_expanded.shape}, Selected semantic pos shape: {selected_semantic_pos_expanded.shape}")
-                gripper_pos = gripper_semantic_pos_expanded[:, :gripper_tokens.size(1), :]
-                selected_pos = selected_semantic_pos_expanded[:, :selected_tokens.size(1), :]
+
                 
             else:
                 # 使用传统的type embedding
@@ -304,39 +269,39 @@ class RISE(nn.Module):
             src_padding_mask = torch.cat([src_padding_mask, perceiver_padding_mask], dim=1)
 
         elif self.use_dual_perceiver and gripper_tracks is not None:
-            gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
+            raise NotImplementedError("Selected tracks must be provided when using dual perceiver.")
+            # gripper_tokens = self.gripper_perceiver(gripper_tracks, lengths=gripper_track_lengths)
             
-            if len(gripper_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
-                batch_size_g, num_points_g, num_queries_g, dim_g = gripper_tokens.shape
-                gripper_tokens = gripper_tokens.view(batch_size_g, num_points_g * num_queries_g, dim_g)
+            # if len(gripper_tokens.shape) == 4:  # (batch_size, num_points, num_queries, dim)
+            #     batch_size_g, num_points_g, num_queries_g, dim_g = gripper_tokens.shape
+            #     gripper_tokens = gripper_tokens.view(batch_size_g, num_points_g * num_queries_g, dim_g)
             
-            gripper_tokens = self.perceiver_fusion_layer(gripper_tokens)
+            # gripper_tokens = self.perceiver_fusion_layer(gripper_tokens)
 
-            if self.use_dinov2_semantic_pos and rgb_images is not None:
-                # 类似上面的逻辑，但只处理gripper
-                semantic_features = self.semantic_extractor.extract_semantic_features(rgb_images)
-                gripper_semantic_pos = self.semantic_extractor.sample_features_at_positions(
-                    semantic_features, gripper_tracks
-                )
+            # if self.use_dinov2_semantic_pos and rgb_images is not None:
+            #     semantic_features = self.semantic_extractor.extract_semantic_features(rgb_images)
+            #     gripper_semantic_pos = self.semantic_extractor.sample_features_at_positions(
+            #         semantic_features, gripper_tracks
+            #     )
                 
-                gripper_queries_per_point = num_queries_g // num_points_g
-                gripper_semantic_pos_expanded = gripper_semantic_pos.unsqueeze(3).repeat(
-                    1, 1, 1, gripper_queries_per_point, 1
-                ).view(batch_size, -1, self.transformer.d_model)
+            #     gripper_queries_per_point = num_queries_g // num_points_g
+            #     gripper_semantic_pos_expanded = gripper_semantic_pos.unsqueeze(3).repeat(
+            #         1, 1, 1, gripper_queries_per_point, 1
+            #     ).view(batch_size, -1, self.transformer.d_model)
                 
-                gripper_pos = gripper_semantic_pos_expanded[:, :gripper_tokens.size(1), :]
-            else:
-                gripper_type_embed = self.type_embedding(torch.ones(batch_size, gripper_tokens.size(1), dtype=torch.long, device=src.device))
-                gripper_pos = torch.zeros_like(gripper_tokens) + gripper_type_embed
+            #     gripper_pos = gripper_semantic_pos_expanded[:, :gripper_tokens.size(1), :]
+            # else:
+            #     gripper_type_embed = self.type_embedding(torch.ones(batch_size, gripper_tokens.size(1), dtype=torch.long, device=src.device))
+            #     gripper_pos = torch.zeros_like(gripper_tokens) + gripper_type_embed
 
-            src = torch.cat([src, gripper_tokens], dim=1)
-            pos = torch.cat([pos, gripper_pos], dim=1)
+            # src = torch.cat([src, gripper_tokens], dim=1)
+            # pos = torch.cat([pos, gripper_pos], dim=1)
 
-            gripper_padding_mask = torch.zeros(
-                (batch_size, gripper_tokens.size(1)),
-                dtype=torch.bool, device=src.device
-            )
-            src_padding_mask = torch.cat([src_padding_mask, gripper_padding_mask], dim=1)
+            # gripper_padding_mask = torch.zeros(
+            #     (batch_size, gripper_tokens.size(1)),
+            #     dtype=torch.bool, device=src.device
+            # )
+            # src_padding_mask = torch.cat([src_padding_mask, gripper_padding_mask], dim=1)
 
         readout = self.transformer(src, src_padding_mask, self.readout_embed.weight, pos)[-1]
         readout = readout[:, 0]
